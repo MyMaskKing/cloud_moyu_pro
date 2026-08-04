@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex,
 };
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -19,6 +20,98 @@ static CURRENT_BOSS_KEY: Mutex<Option<Shortcut>> = Mutex::new(None);
 static CURRENT_TRANSPARENCY_KEY: Mutex<Option<Shortcut>> = Mutex::new(None);
 /// 记录所有已开启的 web tab label,用于老板键批量隐藏/恢复
 static WEB_TABS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+// ────── M5: 工作进程监测 ──────
+//
+// 轮询系统进程列表,匹配"工作类"应用(钉钉/腾讯会议/Zoom 等),
+// 命中时 emit `work-app-detected`,消失时 emit `work-app-gone`,
+// 由前端按用户配置决定切伪装或隐藏。
+//
+// 设计要点:
+// - 轮询线程在 setup 中常驻;是否启用、匹配关键字、轮询间隔由前端下发
+// - 用 serde 透传 JSON,避免在 Rust 侧定死进程名单(前端可配置)
+// - 命中/消失都只在状态翻转时 emit,不重复打扰
+
+/// M5 监测配置(关键字列表)。空 = 关闭监测。
+static WORK_MONITOR_ENABLED: AtomicBool = AtomicBool::new(false);
+static WORK_MONITOR_KEYWORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// 上次轮询是否已命中,用于状态翻转去重
+static WORK_MONITOR_TRIGGERED: AtomicBool = AtomicBool::new(false);
+
+/// 前端下发工作监测配置。keywords 为进程名/可执行路径的子串(大小写不敏感)。
+#[tauri::command]
+fn set_work_monitor_config(enabled: bool, keywords: Vec<String>) {
+    WORK_MONITOR_ENABLED.store(enabled, Ordering::Relaxed);
+    if let Ok(mut g) = WORK_MONITOR_KEYWORDS.lock() {
+        *g = keywords
+            .into_iter()
+            .map(|k| k.trim().to_lowercase())
+            .filter(|k| !k.is_empty())
+            .collect();
+    }
+    // 切换配置时复位"已命中"状态,让下一轮按新配置重新判定
+    WORK_MONITOR_TRIGGERED.store(false, Ordering::Relaxed);
+}
+
+/// 轮询线程主体:每 2 秒刷新一次进程列表,做大小写不敏感的子串匹配。
+fn spawn_work_monitor(app: AppHandle) {
+    std::thread::spawn(move || {
+        use sysinfo::{ProcessesToUpdate, ProcessRefreshKind, System, UpdateKind};
+
+        let mut sys = System::new();
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+
+            if !WORK_MONITOR_ENABLED.load(Ordering::Relaxed) {
+                continue;
+            }
+            let keywords = match WORK_MONITOR_KEYWORDS.lock() {
+                Ok(g) if !g.is_empty() => g.clone(),
+                _ => continue,
+            };
+
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                // 只取我们需要的:进程名 + 可执行路径,不浪费 CPU 算使用率
+                ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet),
+            );
+
+            let hit = sys.processes().values().any(|p| {
+                let name = p.name().to_string_lossy().to_lowercase();
+                let exe = p
+                    .exe()
+                    .map(|e| e.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                keywords.iter().any(|kw| name.contains(kw) || exe.contains(kw))
+            });
+
+            let was_hit = WORK_MONITOR_TRIGGERED.load(Ordering::Relaxed);
+            if hit && !was_hit {
+                WORK_MONITOR_TRIGGERED.store(true, Ordering::Relaxed);
+                let _ = app.emit("work-app-detected", ());
+            } else if !hit && was_hit {
+                WORK_MONITOR_TRIGGERED.store(false, Ordering::Relaxed);
+                let _ = app.emit("work-app-gone", ());
+            }
+        }
+    });
+}
+
+/// 批量隐藏/显示所有 web-tab(M5 切伪装时用:伪装层遮住主窗,但独立子窗会穿帮,必须一并隐藏)
+#[tauri::command]
+fn set_all_tabs_hidden(app: AppHandle, hidden: bool) {
+    let labels = WEB_TABS.lock().map(|g| g.clone()).unwrap_or_default();
+    for l in labels {
+        if let Some(win) = app.get_webview_window(&l) {
+            if hidden {
+                let _ = win.hide();
+            } else {
+                let _ = win.show();
+            }
+        }
+    }
+}
 
 fn tab_label(id: &str) -> String {
     format!("web-tab-{id}")
@@ -1048,6 +1141,8 @@ pub fn run() {
             set_web_tab_pinned,
             signal_pin_toggle,
             notify_web_tab_mode,
+            set_work_monitor_config,
+            set_all_tabs_hidden,
         ])
         .setup(move |app| {
             if let Some(win) = app.get_webview_window("main") {
@@ -1061,6 +1156,8 @@ pub fn run() {
             } else if let Ok(mut g) = CURRENT_BOSS_KEY.lock() {
                 *g = Some(default_boss);
             }
+            // M5: 启动工作进程监测轮询线程(默认关闭,前端下发配置后生效)
+            spawn_work_monitor(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

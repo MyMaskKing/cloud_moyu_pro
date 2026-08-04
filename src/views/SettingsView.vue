@@ -1,6 +1,39 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useAuthStore } from "../stores/auth";
+import { useDisguiseStore } from "../stores/disguise";
+import type { DisguiseSkin } from "../stores/disguise";
+import VipLock from "../components/VipLock.vue";
+
+const auth = useAuthStore();
+const disguise = useDisguiseStore();
+
+// ────── M4 皮肤选择 ──────
+const SKINS: { key: DisguiseSkin; name: string; desc: string }[] = [
+  { key: "vscode", name: "VS Code", desc: "代码编辑器 + 终端测试输出" },
+  { key: "excel",  name: "Excel",   desc: "预算执行分析表格" },
+  { key: "ppt",    name: "PowerPoint", desc: "季度经营回顾演示" },
+];
+function pickSkin(s: DisguiseSkin) {
+  disguise.setSkin(s);
+}
+
+// ────── M5 关键字编辑 ──────
+const newKeyword = ref("");
+function addKeyword() {
+  const k = newKeyword.value.trim();
+  if (!k) return;
+  if (props.workMonitorKeywords.some((x) => x.toLowerCase() === k.toLowerCase())) {
+    newKeyword.value = "";
+    return;
+  }
+  emit("update:workMonitorKeywords", [...props.workMonitorKeywords, k]);
+  newKeyword.value = "";
+}
+function removeKeyword(k: string) {
+  emit("update:workMonitorKeywords", props.workMonitorKeywords.filter((x) => x !== k));
+}
 
 const props = defineProps<{
   autoHide: boolean;
@@ -9,6 +42,10 @@ const props = defineProps<{
   bossKey: string;
   transparencyKey: string;
   bypassOpacity: boolean;
+  workMonitor: boolean;
+  workMonitorAction: "disguise" | "hide";
+  workMonitorKeywords: string[];
+  workAppPresent: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -17,8 +54,54 @@ const emit = defineEmits<{
   (e: "update:videoAutoLandscape", v: boolean): void;
   (e: "update:bossKey", v: string): void;
   (e: "update:transparencyKey", v: string): void;
+  (e: "update:workMonitor", v: boolean): void;
+  (e: "update:workMonitorAction", v: "disguise" | "hide"): void;
+  (e: "update:workMonitorKeywords", v: string[]): void;
+  (e: "previewDisguise"): void;
   (e: "close"): void;
 }>();
+
+// ────── 账号 / 会员(mock) ──────
+const account = ref("");
+const verifyCode = ref("");
+const redeemCode = ref("");
+const authBusy = computed(() => auth.loading);
+const expireLabel = computed(() => {
+  if (!auth.vipExpireAt) return "";
+  return new Date(auth.vipExpireAt).toLocaleDateString();
+});
+
+async function onLogin() {
+  if (!account.value.trim()) return;
+  try {
+    await auth.login(account.value.trim(), verifyCode.value.trim());
+    verifyCode.value = "";
+  } catch {
+    // 错误信息已在 auth.error,这里无需额外处理
+  }
+}
+async function onLogout() {
+  await auth.logout();
+  account.value = "";
+  redeemCode.value = "";
+}
+async function onRedeem() {
+  if (!redeemCode.value.trim()) return;
+  try {
+    await auth.redeem(redeemCode.value.trim());
+    redeemCode.value = "";
+  } catch {
+    // 同上
+  }
+}
+function onUnlockVip() {
+  // 未登录时先登录;已登录则聚焦兑换码输入
+  if (!auth.isLoggedIn) {
+    document.querySelector<HTMLInputElement>(".account-input")?.focus();
+  } else {
+    document.querySelector<HTMLInputElement>(".redeem-input")?.focus();
+  }
+}
 
 // 快捷键录制:两个快捷键(boss / transparency)复用同一段状态,用 target 标记当前在录哪个
 type RecordTarget = "boss" | "transp";
@@ -135,6 +218,76 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
     </header>
 
     <div class="settings-body">
+      <!-- 账号与会员(mock) -->
+      <div class="group">
+        <div class="group-title">👤 账号与会员</div>
+        <div class="group-desc">
+          M4 伪装皮肤、M5 工作监测自动隐藏为 VIP 功能。当前为测试登录环境,
+          任意账号 + 验证码 <code>123456</code> 即可登录,兑换码 <code>MUOYU-VIP</code> 开通。
+        </div>
+
+        <!-- 未登录:登录表单 -->
+        <div v-if="!auth.isLoggedIn" class="group-content">
+          <div class="row">
+            <span class="label">账号</span>
+            <input
+              v-model="account"
+              class="text-input account-input"
+              placeholder="昵称 / 手机号 / 邮箱"
+              @keydown.enter="onLogin"
+            />
+          </div>
+          <div class="row">
+            <span class="label">验证码</span>
+            <input
+              v-model="verifyCode"
+              class="text-input"
+              placeholder="mock: 123456"
+              @keydown.enter="onLogin"
+            />
+          </div>
+          <div v-if="auth.error" class="row">
+            <span class="hint error">{{ auth.error }}</span>
+          </div>
+          <div class="row actions">
+            <button class="btn primary" :disabled="authBusy || !account.trim()" @click="onLogin">
+              {{ authBusy ? '…' : '登录' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 已登录:会员状态 -->
+        <div v-else class="group-content">
+          <div class="row">
+            <span class="label">当前账号</span>
+            <span class="mono">{{ auth.user?.nickname }}</span>
+          </div>
+          <div class="row">
+            <span class="label">会员状态</span>
+            <span v-if="auth.isVip" class="vip-badge">✓ VIP 至 {{ expireLabel }}</span>
+            <span v-else class="hint">未开通</span>
+          </div>
+          <div v-if="!auth.isVip" class="row">
+            <span class="label">兑换码</span>
+            <input
+              v-model="redeemCode"
+              class="text-input redeem-input"
+              placeholder="输入兑换码"
+              @keydown.enter="onRedeem"
+            />
+            <button class="btn primary" :disabled="authBusy" @click="onRedeem">
+              {{ authBusy ? '…' : '开通' }}
+            </button>
+          </div>
+          <div v-if="auth.error" class="row">
+            <span class="hint error">{{ auth.error }}</span>
+          </div>
+          <div class="row actions">
+            <button class="btn" :disabled="authBusy" @click="onLogout">退出登录</button>
+          </div>
+        </div>
+      </div>
+
       <!-- 老板快捷键 -->
       <div class="group">
         <div class="group-title">🚨 老板快捷键</div>
@@ -243,6 +396,106 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
             />
             <span class="mono">{{ autoHideDelay }} ms</span>
           </div>
+        </div>
+      </div>
+
+      <!-- M4 伪装皮肤 (VIP) -->
+      <div class="group">
+        <div class="group-title">🎭 伪装皮肤 <span class="vip-tag">VIP</span></div>
+        <div class="group-desc">
+          一键把窗口伪装成工作界面。进入后按 <code>Esc</code> 或点状态栏右侧图标退出,
+          老板键恢复时也会自动退出伪装。标题栏 🎭 按钮可随时切换。
+        </div>
+        <div class="group-content">
+          <VipLock feature="disguise" @unlock="onUnlockVip">
+            <div class="skin-list">
+              <div
+                v-for="s in SKINS"
+                :key="s.key"
+                class="skin-card"
+                :class="{ act: disguise.skin === s.key }"
+                @click="pickSkin(s.key)"
+              >
+                <div class="skin-name">{{ s.name }}</div>
+                <div class="skin-desc">{{ s.desc }}</div>
+              </div>
+            </div>
+            <div class="row actions">
+              <button class="btn primary" @click="emit('previewDisguise')">▶ 立即伪装</button>
+              <span class="hint">当前皮肤:{{ SKINS.find(x => x.key === disguise.skin)?.name }}</span>
+            </div>
+          </VipLock>
+        </div>
+      </div>
+
+      <!-- M5 工作监测自动隐藏 (VIP) -->
+      <div class="group">
+        <div class="group-title">🕵️ 工作监测自动隐藏 <span class="vip-tag">VIP</span></div>
+        <div class="group-desc">
+          后台每 2 秒扫描一次进程列表,命中下列关键字(进程名或路径,不区分大小写)时
+          自动切伪装或隐藏。为避免"老板还在旁边就弹回摸鱼界面",进程退出后<b>不会</b>自动恢复,
+          需手动退出。
+        </div>
+        <div class="group-content">
+          <VipLock feature="workMonitor" @unlock="onUnlockVip">
+            <div class="row">
+              <span class="label">启用监测</span>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="workMonitor"
+                  @change="emit('update:workMonitor', ($event.target as HTMLInputElement).checked)"
+                />
+                <span class="slider"></span>
+              </label>
+              <span v-if="workMonitor" class="hint">
+                {{ workAppPresent ? '⚠ 当前检测到工作应用运行中' : '✓ 监测中,未发现工作应用' }}
+              </span>
+            </div>
+
+            <template v-if="workMonitor">
+              <div class="row">
+                <span class="label">命中动作</span>
+                <label class="radio">
+                  <input
+                    type="radio"
+                    :checked="workMonitorAction === 'disguise'"
+                    @change="emit('update:workMonitorAction', 'disguise')"
+                  />
+                  <span>切伪装皮肤</span>
+                </label>
+                <label class="radio">
+                  <input
+                    type="radio"
+                    :checked="workMonitorAction === 'hide'"
+                    @change="emit('update:workMonitorAction', 'hide')"
+                  />
+                  <span>直接隐藏(等同老板键)</span>
+                </label>
+              </div>
+
+              <div class="row" style="align-items:flex-start">
+                <span class="label" style="padding-top:5px">监测关键字</span>
+                <div class="kw-box">
+                  <span v-for="k in workMonitorKeywords" :key="k" class="kw">
+                    {{ k }}
+                    <i class="kw-x" @click="removeKeyword(k)" title="移除">×</i>
+                  </span>
+                </div>
+              </div>
+              <div class="row">
+                <span class="label"></span>
+                <input
+                  v-model="newKeyword"
+                  class="text-input"
+                  style="max-width:180px"
+                  placeholder="新增关键字,如 zoom"
+                  @keydown.enter="addKeyword"
+                />
+                <button class="btn" :disabled="!newKeyword.trim()" @click="addKeyword">＋ 添加</button>
+              </div>
+            </template>
+          </VipLock>
         </div>
       </div>
     </div>
@@ -407,4 +660,102 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
 }
 .switch input:checked + .slider { background: #1f6feb; }
 .switch input:checked + .slider::before { transform: translateX(16px); }
+
+.text-input {
+  flex: 1;
+  height: 30px;
+  max-width: 260px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #e6edf3;
+  font-size: 12px;
+  outline: none;
+}
+.text-input:focus { border-color: #58a6ff; }
+.hint.error { color: #f85149; }
+.vip-badge {
+  font-size: 12px;
+  color: #d4a017;
+  font-weight: 600;
+}
+.vip-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #1c1c1c;
+  background: linear-gradient(135deg, #d4a017, #f0c040);
+  border-radius: 4px;
+  vertical-align: middle;
+}
+code {
+  padding: 1px 5px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #58a6ff;
+}
+
+/* M4 皮肤卡片 */
+.skin-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.skin-card {
+  flex: 1;
+  min-width: 130px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.skin-card:hover { background: rgba(255, 255, 255, 0.07); }
+.skin-card.act {
+  border-color: #1f6feb;
+  background: rgba(31, 111, 235, 0.15);
+}
+.skin-name { font-size: 12px; color: #e6edf3; font-weight: 600; }
+.skin-desc { font-size: 11px; color: #6e7681; margin-top: 3px; line-height: 1.4; }
+
+/* M5 关键字标签 */
+.kw-box {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-height: 92px;
+  overflow-y: auto;
+}
+.kw {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11px;
+  color: #c9d1d9;
+}
+.kw-x {
+  font-style: normal;
+  cursor: pointer;
+  color: #6e7681;
+  font-size: 12px;
+  line-height: 1;
+}
+.kw-x:hover { color: #f85149; }
+
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #c9d1d9;
+  cursor: pointer;
+}
+.radio input { accent-color: #58a6ff; }
 </style>

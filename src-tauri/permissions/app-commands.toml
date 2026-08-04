@@ -38,4 +38,6 @@ commands.allow = [
     "set_main_window_pinned",
     "set_web_tab_pinned",
     "notify_web_tab_mode",
+    "set_work_monitor_config",
+    "set_all_tabs_hidden",
 ]

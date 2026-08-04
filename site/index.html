@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>云摸鱼 · 极致轻量的桌面摸鱼神器</title>
+<meta name="description" content="云摸鱼(cloud_moyu),基于 Tauri 2 + Vue 3 打造,包体 ≤10MB、内存 ≤120MB。VSCode 伪装皮肤、工作监测自动隐藏,老板来了也不慌。" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --bg:#0A0E13; --bg2:#0E131B; --elev:#121923; --card:#161E2A;
+  --border:#222D3D; --border2:#2C3A4D;
+  --text:#EAF0F7; --muted:#8896A8; --dim:#5E6E82;
+  --primary:#34D9C1; --primary-ink:#062B27; --primary-dim:#1B7A6E;
+  --pro:#FF8C42; --pro-ink:#2A1300; --pro-dim:#B8602A; --pro-glow:rgba(255,140,66,.22);
+  --cyan-glow:rgba(52,217,193,.18);
+  --radius:14px;
+  --sans:'Inter','PingFang SC','Microsoft YaHei',-apple-system,sans-serif;
+  --display:'Sora','PingFang SC','Microsoft YaHei',sans-serif;
+  --mono:'JetBrains Mono',Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.65;
+  -webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+img{max-width:100%;display:block}
+.wrap{max-width:1160px;margin:0 auto;padding:0 24px}
+.mono{font-family:var(--mono)}
+
+/* ===== 背景氛围 ===== */
+.bg-orb{position:fixed;border-radius:50%;filter:blur(120px);pointer-events:none;z-index:0}
+.bg-orb.a{width:520px;height:520px;background:var(--cyan-glow);top:-180px;right:-120px;opacity:.7}
+.bg-orb.b{width:460px;height:460px;background:var(--pro-glow);bottom:-200px;left:-140px;opacity:.5}
+main,.nav,footer{position:relative;z-index:1}
+
+/* ===== 导航 ===== */
+.nav{position:sticky;top:0;z-index:40;backdrop-filter:blur(14px);
+  background:rgba(10,14,19,.72);border-bottom:1px solid transparent;transition:border-color .3s}
+.nav.scrolled{border-bottom-color:var(--border)}
+.nav-in{display:flex;align-items:center;height:66px}
+.logo{display:flex;align-items:center;gap:10px;font-family:var(--display);font-weight:800;font-size:19px}
+.logo .mk{width:32px;height:32px;border-radius:9px;background:linear-gradient(135deg,var(--primary),#2AA4C9);
+  display:grid;place-items:center;color:var(--primary-ink);font-size:18px;box-shadow:0 6px 20px var(--cyan-glow)}
+.logo small{font-family:var(--mono);font-size:11px;color:var(--dim);font-weight:500;letter-spacing:.5px}
+.nav-links{display:flex;gap:30px;margin-left:48px}
+.nav-links a{color:var(--muted);font-size:14.5px;font-weight:500;transition:color .15s}
+.nav-links a:hover{color:var(--text)}
+.nav-right{margin-left:auto;display:flex;align-items:center;gap:14px}
+.btn{font-family:var(--sans);font-weight:600;font-size:14px;padding:10px 20px;border-radius:10px;cursor:pointer;
+  border:1px solid transparent;display:inline-flex;align-items:center;gap:8px;transition:transform .08s,background .18s,border-color .18s;white-space:nowrap}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--primary);color:var(--primary-ink)}
+.btn-primary:hover{background:#5BE6D2}
+.btn-pro{background:var(--pro);color:var(--pro-ink)}
+.btn-pro:hover{background:#FFA366}
+.btn-ghost{background:transparent;color:var(--text);border-color:var(--border2)}
+.btn-ghost:hover{background:var(--elev);border-color:var(--dim)}
+.btn-lg{padding:14px 26px;font-size:15.5px;border-radius:12px}
+
+/* ===== Hero ===== */
+.hero{padding:72px 0 60px}
+.hero-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center}
+.eyebrow{display:inline-flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12.5px;
+  color:var(--primary);background:rgba(52,217,193,.08);border:1px solid rgba(52,217,193,.25);
+  padding:6px 13px;border-radius:100px;margin-bottom:24px;font-weight:500}
+.eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--primary);box-shadow:0 0 10px var(--primary)}
+h1.hero-title{font-family:var(--display);font-weight:800;font-size:56px;line-height:1.08;letter-spacing:-1.5px;margin-bottom:20px}
+h1.hero-title .grad{background:linear-gradient(100deg,var(--primary) 10%,#5BE6D2 50%,#7FB8FF 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.hero-sub{font-size:17.5px;color:var(--muted);max-width:520px;margin-bottom:18px}
+.hero-sub b{color:var(--text);font-weight:600}
+.hero-cta{display:flex;gap:13px;margin:30px 0 22px;flex-wrap:wrap}
+.hero-meta{display:flex;flex-wrap:wrap;gap:9px}
+.chip{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--elev);
+  border:1px solid var(--border);padding:5px 11px;border-radius:7px}
+.chip b{color:var(--text);font-weight:700}
+
+/* Hero mockup:伪装窗口 */
+.mockup{position:relative}
+.mockup::before{content:"";position:absolute;inset:-30px;background:radial-gradient(closest-side,var(--cyan-glow),transparent);z-index:-1}
+.window{background:var(--elev);border:1px solid var(--border);border-radius:16px;overflow:hidden;
+  box-shadow:0 40px 90px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.02)}
+.win-bar{height:40px;background:#1A2230;display:flex;align-items:center;padding:0 14px;gap:8px;border-bottom:1px solid var(--border)}
+.win-bar .lights{display:flex;gap:7px}
+.win-bar .lights i{width:11px;height:11px;border-radius:50%;display:block}
+.win-bar .lights i:nth-child(1){background:#FF5F56}
+.win-bar .lights i:nth-child(2){background:#FFBD2E}
+.win-bar .lights i:nth-child(3){background:#27C93F}
+.win-tab{margin-left:12px;font-family:var(--mono);font-size:12px;color:#C8D2DE;background:#222C3A;
+  padding:6px 16px;border-radius:6px 6px 0 0;display:flex;align-items:center;gap:8px}
+.win-tab .fav{width:14px;height:14px;border-radius:3px;background:linear-gradient(135deg,#34D9C1,#2AA4C9)}
+.win-body{height:300px;position:relative;overflow:hidden;background:#0F141C}
+/* 两种皮肤切换 */
+.skin{position:absolute;inset:0;transition:opacity .5s,transform .5s}
+.skin.fish{opacity:1;transform:translateY(0)}
+.skin.code{opacity:0;transform:translateY(12px);pointer-events:none}
+.mockup.disguised .skin.fish{opacity:0;transform:translateY(-12px)}
+.mockup.disguised .skin.code{opacity:1;transform:translateY(0)}
+/* 摸鱼皮肤:阅读器 */
+.fish-ui{display:flex;flex-direction:column;height:100%;padding:22px 26px}
+.fish-ui .rd{font-size:11px;font-family:var(--mono);color:var(--dim);letter-spacing:1px;margin-bottom:10px}
+.fish-ui h4{font-family:var(--display);font-size:20px;color:var(--text);margin-bottom:6px}
+.fish-ui .by{font-size:12px;color:var(--dim);margin-bottom:16px}
+.fish-ui p{font-size:13.5px;color:#A9B6C6;line-height:1.9;margin-bottom:10px}
+.fish-ui .bar{margin-top:auto;height:4px;background:#1E2836;border-radius:4px;overflow:hidden}
+.fish-ui .bar i{display:block;width:42%;height:100%;background:var(--primary)}
+/* 代码皮肤:VSCode */
+.code-ui{display:flex;height:100%;font-family:var(--mono);font-size:12px;line-height:1.85}
+.code-ui .gutter{background:#1B2330;color:#4A5A6E;padding:16px 10px;text-align:right;min-width:42px;user-select:none}
+.code-ui .lines{padding:16px 14px;white-space:pre;overflow:hidden}
+.k{color:#569CD6}.s{color:#CE9178}.cm{color:#6A9955;font-style:italic}.fn{color:#DCDCAA}.v{color:#9CDCFE}.n{color:#B5CEA8}
+/* 监测状态条 */
+.detect{position:absolute;left:16px;right:16px;bottom:14px;background:rgba(10,14,19,.92);
+  border:1px solid var(--border2);border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:11px;
+  font-size:12.5px;backdrop-filter:blur(6px);transform:translateY(70px);opacity:0;transition:.4s}
+.mockup.disguised .detect{transform:translateY(0);opacity:1}
+.detect .ic{width:30px;height:30px;border-radius:8px;background:var(--pro-glow);color:var(--pro);
+  display:grid;place-items:center;font-size:15px;flex-shrink:0}
+.detect .t{color:var(--text);font-weight:600}
+.detect .t b{color:var(--pro)}
+.detect .s{color:var(--dim);font-size:11px;font-family:var(--mono)}
+
+/* ===== 数据条 ===== */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);
+  border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin:10px 0 0}
+.stat{background:var(--bg2);padding:26px 22px;text-align:center}
+.stat .num{font-family:var(--display);font-weight:800;font-size:34px;color:var(--primary);line-height:1}
+.stat .num.alt{color:var(--pro)}
+.stat .lbl{font-size:13px;color:var(--muted);margin-top:9px}
+.stat .sub{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:3px}
+
+/* ===== 通用 section ===== */
+section{padding:88px 0}
+.sec-head{text-align:center;max-width:640px;margin:0 auto 52px}
+.sec-kicker{font-family:var(--mono);font-size:12.5px;color:var(--primary);letter-spacing:1.5px;
+  text-transform:uppercase;font-weight:600;margin-bottom:14px}
+.sec-kicker.pro{color:var(--pro)}
+.sec-head h2{font-family:var(--display);font-weight:800;font-size:38px;line-height:1.2;letter-spacing:-.8px;margin-bottom:14px}
+.sec-head p{color:var(--muted);font-size:16.5px}
+
+/* ===== 功能网格(免费) ===== */
+.feat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.feat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:26px 24px;
+  transition:transform .2s,border-color .2s,background .2s}
+.feat:hover{transform:translateY(-4px);border-color:var(--border2);background:#19222F}
+.feat .ic{width:44px;height:44px;border-radius:11px;background:rgba(52,217,193,.1);
+  border:1px solid rgba(52,217,193,.22);display:grid;place-items:center;font-size:21px;margin-bottom:16px}
+.feat h3{font-family:var(--display);font-size:17.5px;font-weight:700;margin-bottom:8px}
+.feat p{color:var(--muted);font-size:14px;line-height:1.65}
+
+/* ===== Pro 区(收费点) ===== */
+.pro-section{background:linear-gradient(180deg,transparent,rgba(255,140,66,.05),transparent)}
+.pro-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.pro-card{position:relative;background:linear-gradient(180deg,#1E1A16,#14181F);
+  border:1px solid var(--pro-dim);border-radius:18px;padding:34px 32px;overflow:hidden}
+.pro-card::before{content:"✦";position:absolute;top:24px;right:28px;font-size:42px;color:var(--pro);opacity:.18}
+.pro-card .tag{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;
+  color:var(--pro);background:var(--pro-glow);border:1px solid rgba(255,140,66,.3);
+  padding:5px 11px;border-radius:100px;margin-bottom:18px;font-weight:700;letter-spacing:.5px}
+.pro-card h3{font-family:var(--display);font-size:25px;font-weight:800;letter-spacing:-.4px;margin-bottom:8px}
+.pro-card .sub{color:var(--muted);font-size:14.5px;margin-bottom:22px}
+.pro-list{list-style:none;display:flex;flex-direction:column;gap:13px;margin-bottom:26px}
+.pro-list li{display:flex;gap:11px;font-size:14.5px;color:#D3DCE8;align-items:flex-start}
+.pro-list li .ck{width:22px;height:22px;border-radius:50%;background:var(--pro);color:var(--pro-ink);
+  display:grid;place-items:center;font-size:12px;font-weight:800;flex-shrink:0;margin-top:1px}
+.pro-list li b{color:var(--text);font-weight:600}
+.mini-mock{background:#0D1118;border:1px solid var(--border);border-radius:10px;padding:16px;margin-top:6px;
+  font-family:var(--mono);font-size:12px}
+.mini-mock .ln{display:flex;gap:10px;color:var(--dim)}
+.mini-mock .ln .sw{color:var(--pro)}
+.mini-mock .ln em{color:#A9B6C6;font-style:normal;margin-left:auto}
+
+/* ===== 定价 ===== */
+.price-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;max-width:860px;margin:0 auto}
+.price{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:36px 34px;position:relative}
+.price.featured{border-color:var(--pro-dim);background:linear-gradient(180deg,#1E1A16,#14181F);
+  box-shadow:0 30px 70px rgba(0,0,0,.4),0 0 0 1px rgba(255,140,66,.15) inset}
+.price .rib{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--pro);
+  color:var(--pro-ink);font-size:12px;font-weight:700;padding:4px 14px;border-radius:100px;font-family:var(--mono)}
+.price h4{font-family:var(--display);font-size:20px;font-weight:700;margin-bottom:6px}
+.price .desc{color:var(--muted);font-size:13.5px;margin-bottom:22px}
+.price .amount{display:flex;align-items:baseline;gap:6px;margin-bottom:6px}
+.price .amount .c{font-family:var(--display);font-weight:800;font-size:48px;color:var(--text)}
+.price.featured .amount .c{color:var(--pro)}
+.price .amount .per{color:var(--dim);font-size:14px}
+.price .note{font-family:var(--mono);font-size:12px;color:var(--dim);margin-bottom:24px}
+.price ul{list-style:none;display:flex;flex-direction:column;gap:12px;margin-bottom:30px}
+.price li{display:flex;gap:10px;font-size:14.5px;color:#C8D2DE;align-items:flex-start}
+.price li::before{content:"";width:18px;height:18px;border-radius:50%;background:rgba(52,217,193,.14);
+  border:1px solid rgba(52,217,193,.3);flex-shrink:0;margin-top:2px;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2334D9C1' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'/></svg>");
+  background-size:11px;background-repeat:no-repeat;background-position:center}
+.price.featured li.pro-item{color:#fff;font-weight:500}
+.price.featured li.pro-item::before{background:var(--pro);border-color:var(--pro);
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232A1300' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'/></svg>");
+  background-size:11px;background-repeat:no-repeat;background-position:center}
+.price li.off{color:var(--dim)}
+.price li.off::before{background:none;border:none;content:"—";width:auto;height:auto;color:var(--dim)}
+.price .btn{width:100%;justify-content:center}
+
+/* ===== CTA 底 ===== */
+.final{text-align:center;padding:90px 0}
+.final .box{background:linear-gradient(135deg,rgba(52,217,193,.08),rgba(255,140,66,.07));
+  border:1px solid var(--border);border-radius:22px;padding:56px 32px}
+.final h2{font-family:var(--display);font-size:36px;font-weight:800;letter-spacing:-.6px;margin-bottom:14px}
+.final p{color:var(--muted);font-size:16.5px;margin-bottom:28px}
+.final .cta-row{display:flex;gap:13px;justify-content:center;flex-wrap:wrap}
+
+/* ===== Footer ===== */
+footer{border-top:1px solid var(--border);padding:40px 0 56px;background:var(--bg2)}
+.foot{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:20px}
+.foot .copy{color:var(--dim);font-size:13px}
+.foot .copy b{color:var(--muted);font-weight:600}
+.foot .links{display:flex;gap:24px}
+.foot .links a{color:var(--muted);font-size:13.5px}
+.foot .links a:hover{color:var(--text)}
+
+/* ===== 老板来了 悬浮按钮 + 覆盖彩蛋 ===== */
+.boss-fab{position:fixed;right:22px;bottom:22px;z-index:50;background:var(--pro);color:var(--pro-ink);
+  border:none;font-family:var(--sans);font-weight:700;font-size:13.5px;padding:12px 18px;border-radius:100px;
+  cursor:pointer;box-shadow:0 12px 30px var(--pro-glow);display:flex;align-items:center;gap:8px;
+  transition:transform .12s;opacity:.92}
+.boss-fab:hover{transform:translateY(-2px);opacity:1}
+.boss-fab kbd{background:rgba(0,0,0,.18);font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:5px}
+.boss-overlay{position:fixed;inset:0;z-index:90;background:#1E1E1E;transform:translateY(105%);
+  transition:transform .35s cubic-bezier(.4,0,.2,1);display:flex;flex-direction:column}
+body.boss .boss-overlay{transform:translateY(0)}
+.bo-bar{height:38px;background:#252526;display:flex;align-items:center;padding-left:14px;gap:6px;
+  border-bottom:1px solid #1B1B1B}
+.bo-tab{background:#1E1E1E;color:#fff;padding:9px 22px;font-family:var(--mono);font-size:13px;
+  border-top:1px solid #2D7D2D;display:flex;gap:8px;align-items:center}
+.bo-stage{flex:1;overflow:auto}
+.bo-back{position:fixed;bottom:18px;right:22px;z-index:95;display:none;background:#0A0E13;
+  border:1px solid var(--pro);color:var(--pro);font-family:var(--mono);font-size:12px;
+  padding:9px 15px;border-radius:8px;cursor:pointer}
+body.boss .bo-back{display:block}
+.bo-hint{position:fixed;top:22px;left:50%;transform:translateX(-50%);z-index:95;display:none;
+  background:rgba(0,0,0,.8);color:#fff;font-size:13px;padding:9px 16px;border-radius:8px;font-family:var(--mono)}
+body.boss .bo-hint{display:block}
+
+/* Toast */
+.toast{position:fixed;top:24px;left:50%;transform:translateX(-50%) translateY(-90px);z-index:100;
+  background:var(--elev);border:1px solid var(--pro-dim);color:var(--text);font-size:13.5px;
+  padding:13px 20px;border-radius:11px;box-shadow:0 16px 50px rgba(0,0,0,.5);transition:transform .4s cubic-bezier(.2,.8,.2,1);max-width:90vw}
+.toast b{color:var(--pro)}
+.toast.show{transform:translateX(-50%) translateY(0)}
+
+/* 响应式 */
+@media(max-width:920px){
+  .hero-grid{grid-template-columns:1fr;gap:48px}
+  h1.hero-title{font-size:42px}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .feat-grid{grid-template-columns:1fr}
+  .pro-grid,.price-grid{grid-template-columns:1fr}
+  .nav-links{display:none}
+  .sec-head h2,.final h2{font-size:30px}
+  section{padding:64px 0}
+}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important;transition:none!important}}
+:focus-visible{outline:2px solid var(--primary);outline-offset:3px;border-radius:4px}
+</style>
+</head>
+<body>
+
+<div class="bg-orb a"></div>
+<div class="bg-orb b"></div>
+
+<!-- 导航 -->
+<nav class="nav" id="nav">
+  <div class="wrap nav-in">
+    <div class="logo">
+      <span class="mk">🐟</span>
+      云摸鱼 <small>cloud_moyu</small>
+    </div>
+    <div class="nav-links">
+      <a href="#features">功能</a>
+      <a href="#pro">Pro 专属</a>
+      <a href="#pricing">定价</a>
+      <a href="https://github.com" target="_blank">GitHub</a>
+    </div>
+    <div class="nav-right">
+      <a class="btn btn-ghost" href="https://github.com" target="_blank">★ Star</a>
+      <a class="btn btn-primary" href="#download">免费下载</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+<!-- Hero -->
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow"><span class="dot"></span>Tauri 2 + Vue 3 · 开源 · Windows / macOS</span>
+      <h1 class="hero-title">上班划水,<br><span class="grad">体面且安全。</span></h1>
+      <p class="hero-sub"><b>云摸鱼</b> 是一款极致轻量的桌面摸鱼工具。包体不到 <b>10MB</b>、内存低于 <b>120MB</b>——只有同类工具的十分之一,却把伪装做到了骨子里。</p>
+      <p class="hero-sub">多标签看书刷剧、全局老板键、鼠标移出自动隐藏;Pro 更能一键伪装成 VSCode,并在会议软件启动时<b>瞬间切屏</b>。</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary btn-lg" href="#download">⬇ 免费下载</a>
+        <a class="btn btn-pro btn-lg" href="#pricing">✦ 解锁 Pro</a>
+      </div>
+      <div class="hero-meta">
+        <span class="chip">包体 <b>≤ 10MB</b></span>
+        <span class="chip">内存 <b>≤ 120MB</b></span>
+        <span class="chip">反应 <b>&lt; 300ms</b></span>
+        <span class="chip">核心 <b>永久免费</b></span>
+      </div>
+    </div>
+
+    <!-- 伪装窗口 mockup -->
+    <div class="mockup" id="mockup">
+      <div class="window">
+        <div class="win-bar">
+          <span class="lights"><i></i><i></i><i></i></span>
+          <div class="win-tab" id="winTab"><span class="fav"></span><span id="winTabName">微信读书</span></div>
+        </div>
+        <div class="win-body">
+          <!-- 摸鱼皮肤 -->
+          <div class="skin fish">
+            <div class="fish-ui">
+              <div class="rd">READER · 第 3 章</div>
+              <h4>人类群星闪耀时</h4>
+              <div class="by">斯蒂芬·茨威格 · 已读 42%</div>
+              <p>在一个被命运搅动的清晨,君士坦丁堡的城门缓缓打开。没有人知道,那扇门后藏着的是一整个时代的终章……</p>
+              <p>他站在城墙之上,望着海平面上由远及近的帆影,忽然明白:所谓英雄,不过是在历史的缝隙里,恰好没有退缩的普通人。</p>
+              <div class="bar"><i></i></div>
+            </div>
+          </div>
+          <!-- 代码皮肤(M4) -->
+          <div class="skin code">
+            <div class="code-ui">
+              <div class="gutter">1<br>2<br>3<br>4<br>5<br>6<br>7<br>8<br>9<br>10</div>
+<div class="lines"><span class="cm">// 数据处理服务</span>
+<span class="k">import</span> { Injectable } <span class="k">from</span> <span class="s">'@nestjs/common'</span>;
+
+@<span class="fn">Injectable</span>()
+<span class="k">export class</span> <span class="v">DataProcessor</span> {
+  <span class="k">async</span> <span class="fn">transform</span>(rows: Row[]) {
+    <span class="k">return</span> rows.<span class="fn">filter</span>(r =&gt; r.valid)
+               .<span class="fn">map</span>(r =&gt; (<span class="k">this</span>.<span class="fn">normalize</span>(r)));
+  }
+}</div>
+            </div>
+            <!-- M5 监测提示 -->
+            <div class="detect">
+              <div class="ic">🚨</div>
+              <div>
+                <div class="t">监测到 <b>腾讯会议</b> 启动,已自动切换伪装</div>
+                <div class="s">M5 · 耗时 247ms · M4 皮肤:VSCode</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 数据条 -->
+  <div class="wrap">
+    <div class="stats" style="margin-top:64px">
+      <div class="stat"><div class="num">≤10<span style="font-size:18px">MB</span></div><div class="lbl">安装包体</div><div class="sub">Electron 同类 ~100MB</div></div>
+      <div class="stat"><div class="num">≤120<span style="font-size:18px">MB</span></div><div class="lbl">运行内存</div><div class="sub">Rust 内核</div></div>
+      <div class="stat"><div class="num alt">&lt;300<span style="font-size:18px">ms</span></div><div class="lbl">老板键响应</div><div class="sub">秒切伪装</div></div>
+      <div class="stat"><div class="num">100<span style="font-size:18px">%</span></div><div class="lbl">核心免费开源</div><div class="sub">MIT · 可审计</div></div>
+    </div>
+  </div>
+</header>
+
+<!-- 免费功能 -->
+<section id="features">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-kicker">CORE · 社区版永久免费</div>
+      <h2>该有的,一个不少</h2>
+      <p>云摸鱼的核心能力全部开源免费。轻量、干净、不流氓,是我们对自己的底线要求。</p>
+    </div>
+    <div class="feat-grid">
+      <div class="feat"><div class="ic">🪟</div><h3>无边框透明窗口</h3><p>基于 Tauri 2 的原生透明窗口,可调节透明度,悬浮在屏幕任意角落,几乎不留下存在感。</p></div>
+      <div class="feat"><div class="ic">📑</div><h3>多标签 + 站点预设</h3><p>内置微信读书、B 站、番茄小说、知乎等常用站点,多标签并行,上次打开的内容自动恢复。</p></div>
+      <div class="feat"><div class="ic">🚨</div><h3>全局老板键</h3><p>按下 ` ~ ` 一键隐藏/切换,全局热键即使窗口失焦也能响应,危急关头不掉链子。</p></div>
+      <div class="feat"><div class="ic">🖱️</div><h3>鼠标移出自动隐藏</h3><p>鼠标离开窗口区域自动收起,需要时滑过即唤回,无需任何多余点击。</p></div>
+      <div class="feat"><div class="ic">📌</div><h3>窗口置顶 + 画中画</h3><p>一键置顶,或缩成小窗画中画模式,边"干活"边看视频,手势快捷键零学习成本。</p></div>
+      <div class="feat"><div class="ic">⚡</div><h3>极致轻量</h3><p>Rust 内核带来 10MB 级包体与百兆内内存占用,老电脑也能秒开,后台常驻毫无负担。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- Pro 收费点 -->
+<section id="pro" class="pro-section">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-kicker pro">✦ PRO · 唯一收费点</div>
+      <h2>让伪装,无懈可击</h2>
+      <p>核心功能永久免费。我们只为真正帮你"避险"的两件高级伪装能力收费——这也是云摸鱼区别于一切同类工具的地方。</p>
+    </div>
+
+    <div class="pro-grid">
+      <!-- M4 -->
+      <div class="pro-card">
+        <span class="tag">M4 · DISGUISE SKIN</span>
+        <h3>VSCode 伪装皮肤</h3>
+        <p class="sub">把整个摸鱼窗口变成一个以假乱真的编辑器、表格或 PPT。路过的人,只会觉得你在认真工作。</p>
+        <ul class="pro-list">
+          <li><span class="ck">✓</span><span><b>VSCode / Excel / PPT</b> 三套皮肤,标题栏、行号、光标、状态栏全部还原</span></li>
+          <li><span class="ck">✓</span><span>皮肤之上正常浏览阅读,老板走近一眼看过去是<b>满屏代码</b></span></li>
+          <li><span class="ck">✓</span><span>一键切换,与老板键、自动隐藏无缝联动</span></li>
+        </ul>
+        <div class="mini-mock">
+          <div class="ln"><span class="sw">●</span> VSCode.dark-plus <em>当前皮肤</em></div>
+          <div class="ln"><span style="visibility:hidden">●</span> Excel.sheet</div>
+          <div class="ln"><span style="visibility:hidden">●</span> PowerPoint.slide</div>
+        </div>
+      </div>
+
+      <!-- M5 -->
+      <div class="pro-card">
+        <span class="tag">M5 · AUTO BOSS DETECTION</span>
+        <h3>工作监测自动隐藏</h3>
+        <p class="sub">后台静默监听工作软件进程。一旦你点开会议、或被人 @,在对方视线抵达屏幕前,窗口已自动切好伪装。</p>
+        <ul class="pro-list">
+          <li><span class="ck">✓</span><span>识别 <b>钉钉 / 腾讯会议 / Zoom / 企业微信</b> 等进程启动</span></li>
+          <li><span class="ck">✓</span><span><b>&lt; 300ms</b> 反应,自动切换 M4 伪装皮肤或隐藏窗口</span></li>
+          <li><span class="ck">✓</span><span>静默运行、低占用,自定义监测名单与触发动作</span></li>
+        </ul>
+        <div class="mini-mock">
+          <div class="ln"><span class="sw">●</span> watch: [钉钉, 腾讯会议, Zoom] <em>监测中</em></div>
+          <div class="ln"><span style="visibility:hidden">●</span> onDetected → switchToDisguise()</div>
+          <div class="ln"><span style="visibility:hidden">●</span> reaction: instant</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 定价 -->
+<section id="pricing">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-kicker">PRICING</div>
+      <h2>一次买断,不是订阅</h2>
+      <p>核心功能永久免费。Pro 仅 39 元,解锁全部高级伪装能力,支持 3 台设备。</p>
+    </div>
+    <div class="price-grid">
+      <div class="price">
+        <h4>社区版</h4>
+        <div class="desc">给每一个想轻松一点的打工人</div>
+        <div class="amount"><span class="c">¥0</span></div>
+        <div class="note">永久免费 · 开源可审计</div>
+        <ul>
+          <li>多标签 + 内置站点预设</li>
+          <li>无边框透明窗口</li>
+          <li>全局老板键 ~</li>
+          <li>鼠标移出自动隐藏</li>
+          <li>窗口置顶 + 画中画</li>
+          <li class="off">M4 VSCode 伪装皮肤</li>
+          <li class="off">M5 工作监测自动隐藏</li>
+        </ul>
+        <a class="btn btn-ghost" href="#download">免费下载</a>
+      </div>
+
+      <div class="price featured">
+        <span class="rib">✦ 推荐</span>
+        <h4>Pro</h4>
+        <div class="desc">让伪装无懈可击</div>
+        <div class="amount"><span class="c">¥39</span><span class="per">/ 买断</span></div>
+        <div class="note">3 台设备 · 后续皮肤持续更新</div>
+        <ul>
+          <li>包含社区版全部能力</li>
+          <li class="pro-item">M4 · VSCode / Excel / PPT 伪装皮肤</li>
+          <li class="pro-item">M5 · 工作软件进程监测自动隐藏</li>
+          <li class="pro-item">检测到会议 &lt; 300ms 秒切伪装</li>
+          <li class="pro-item">自定义监测名单与触发动作</li>
+          <li>优先技术支持</li>
+        </ul>
+        <a class="btn btn-pro" href="#" onclick="alert('Pro 预售登记即将开放,感谢支持!');return false;">立即购买 Pro</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 最终 CTA -->
+<section id="download" class="final">
+  <div class="wrap">
+    <div class="box">
+      <h2>现在就开始,体面摸鱼</h2>
+      <p>10MB,10 秒安装。核心功能永久免费,不收集任何数据。</p>
+      <div class="cta-row">
+        <a class="btn btn-primary btn-lg" href="#">⬇ 下载 Windows</a>
+        <a class="btn btn-ghost btn-lg" href="#">🍎 下载 macOS</a>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div class="copy">© 2026 <b>云摸鱼 cloud_moyu</b> · 本工具仅供学习与合理使用,请遵守公司规章制度</div>
+    <div class="links">
+      <a href="#features">功能</a>
+      <a href="#pricing">定价</a>
+      <a href="https://github.com" target="_blank">GitHub</a>
+      <a href="#">使用协议</a>
+    </div>
+  </div>
+</footer>
+
+<!-- 老板来了彩蛋 -->
+<button class="boss-fab" id="bossFab">🚨 老板来了 <kbd>~</kbd></button>
+<div class="boss-overlay" id="bossOverlay">
+  <div class="bo-bar"><div class="bo-tab">🟦 data-processor.ts</div></div>
+  <div class="bo-stage">
+    <div class="code-ui" style="font-size:13.5px;line-height:1.9">
+      <div class="gutter" id="bGut"></div>
+<div class="lines" id="bCode"><span class="cm">/** 数据处理服务 —— 校验 JWT 并注入用户上下文 */</span>
+<span class="k">import</span> { Injectable } <span class="k">from</span> <span class="s">'@nestjs/common'</span>;
+
+@<span class="fn">Injectable</span>()
+<span class="k">export class</span> <span class="v">DataProcessor</span> {
+  <span class="k">private readonly</span> cache = <span class="k">new</span> Map&lt;string, Row&gt;();
+
+  <span class="k">async</span> <span class="fn">transform</span>(rows: Row[]) {
+    <span class="k">const</span> valid = rows.<span class="fn">filter</span>(r =&gt; r.valid);
+    <span class="k">return</span> valid.<span class="fn">map</span>(r =&gt; ({
+      id: r.id,
+      name: r.name.<span class="fn">trim</span>(),
+      ts: Date.<span class="fn">now</span>(),
+    }));
+  }
+
+  <span class="k">async</span> <span class="fn">flush</span>() {
+    <span class="k">await</span> <span class="k">this</span>.repo.<span class="fn">bulkUpsert</span>([...<span class="k">this</span>.cache.values()]);
+    <span class="k">this</span>.cache.<span class="fn">clear</span>();
+  }
+}</div>
+    </div>
+  </div>
+</div>
+<button class="bo-back" id="bossBack">← 安全了,返回 (~)</button>
+<div class="bo-hint" id="bossHint">已伪装 · 按 ~ 或 Esc 返回</div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* 导航滚动边框 */
+const nav=document.getElementById('nav');
+addEventListener('scroll',()=>nav.classList.toggle('scrolled',scrollY>10));
+
+/* Hero mockup 自动循环:摸鱼 → M4 伪装 + M5 提示 */
+const mockup=document.getElementById('mockup');
+const tabName=document.getElementById('winTabName');
+let disguised=false;
+function setDisguise(on){
+  disguised=on;
+  mockup.classList.toggle('disguised',on);
+  tabName.textContent=on?'data-processor.ts':'微信读书';
+}
+function cycle(){ setDisguise(!disguised); }
+let timer=setInterval(cycle,3600);
+mockup.addEventListener('mouseenter',()=>clearInterval(timer));
+mockup.addEventListener('mouseleave',()=>timer=setInterval(cycle,2600));
+
+/* 老板来了彩蛋 */
+const toast=document.getElementById('toast');
+function showToast(html){toast.innerHTML=html;toast.classList.add('show');
+  clearTimeout(showToast._t);showToast._t=setTimeout(()=>toast.classList.remove('show'),3400);}
+function bossOn(){
+  document.body.classList.add('boss');
+  showToast('🕵️ <b>M5</b> 监测到工作软件启动,已在 300ms 内启用 <b>M4 伪装皮肤</b>');
+}
+function bossOff(){document.body.classList.remove('boss');}
+document.getElementById('bossFab').addEventListener('click',bossOn);
+document.getElementById('bossBack').addEventListener('click',bossOff);
+document.addEventListener('keydown',e=>{
+  if(e.key==='`'||e.key==='~'){e.preventDefault();document.body.classList.contains('boss')?bossOff():bossOn();}
+  if(e.key==='Escape'&&document.body.classList.contains('boss'))bossOff();
+});
+/* 彩蛋行号 */
+const bc=document.getElementById('bCode');
+document.getElementById('bGut').innerHTML=
+  Array.from({length:(bc.textContent.match(/\n/g)||[]).length+1},(_,i)=>i+1).join('<br>');
+</script>
+</body>
+</html>

@@ -8,6 +8,9 @@ import type { PipRatio } from "./stores/tabs";
 import { useSitesStore } from "./stores/sites";
 import SettingsView from "./views/SettingsView.vue";
 import TabBar from "./components/TabBar.vue";
+import { useAuthStore } from "./stores/auth";
+import { useDisguiseStore } from "./stores/disguise";
+import DisguiseOverlay from "./components/DisguiseOverlay.vue";
 
 // ────── 窗口 / 全局设置 ──────
 const win = getCurrentWindow();
@@ -16,21 +19,42 @@ const showSettings = ref(false);
 const isHidden = ref(false);
 const tabs = useTabsStore();
 const sitesStore = useSitesStore();
+const auth = useAuthStore();
+const disguise = useDisguiseStore();
 
 const STORAGE_KEY = "moyu-settings-v1";
+/** M5 检测到工作应用后执行的动作 */
+type WorkAction = "disguise" | "hide";
 interface Settings {
   autoHide: boolean;
   autoHideDelay: number;
   videoAutoLandscape: boolean;
   bossKey: string;
   transparencyKey: string; // 空字符串 = 未设置
+  /** M5:是否启用工作进程监测 */
+  workMonitor: boolean;
+  /** M5:命中后动作 —— 切伪装皮肤 / 直接隐藏 */
+  workMonitorAction: WorkAction;
+  /** M5:进程关键字(大小写不敏感子串匹配) */
+  workMonitorKeywords: string[];
 }
+const DEFAULT_WORK_KEYWORDS = [
+  "dingtalk", "钉钉",
+  "wemeet", "txmeeting", "腾讯会议",
+  "zoom",
+  "feishu", "lark", "飞书",
+  "teams",
+  "wework", "企业微信",
+];
 const defaults: Settings = {
   autoHide: false,
   autoHideDelay: 1500,
   videoAutoLandscape: true,
   bossKey: "Ctrl+Alt+KeyQ",
   transparencyKey: "",
+  workMonitor: false,
+  workMonitorAction: "disguise",
+  workMonitorKeywords: [...DEFAULT_WORK_KEYWORDS],
 };
 const loaded: Settings = (() => {
   try {
@@ -44,6 +68,9 @@ const autoHideDelay = ref(loaded.autoHideDelay);
 const videoAutoLandscape = ref(loaded.videoAutoLandscape);
 const bossKey = ref(loaded.bossKey);
 const transparencyKey = ref(loaded.transparencyKey);
+const workMonitor = ref(loaded.workMonitor);
+const workMonitorAction = ref<WorkAction>(loaded.workMonitorAction);
+const workMonitorKeywords = ref<string[]>(loaded.workMonitorKeywords);
 /** 摸鱼主窗口是否置顶 */
 const mainPinned = ref(false);
 /** 透明度临时绕过:快捷键翻转;true = 强制不透明(方便操作),不改动 opacity 存的值 */
@@ -64,7 +91,8 @@ const popoutTitle = (t: { title?: string; url: string }) =>
   `🐟 ${t.title || t.url}   ·   老板键 ${bossKeyLabel.value}`;
 
 watch(
-  [autoHide, autoHideDelay, videoAutoLandscape, bossKey, transparencyKey],
+  [autoHide, autoHideDelay, videoAutoLandscape, bossKey, transparencyKey,
+   workMonitor, workMonitorAction, workMonitorKeywords],
   () => {
     localStorage.setItem(
       STORAGE_KEY,
@@ -74,9 +102,13 @@ watch(
         videoAutoLandscape: videoAutoLandscape.value,
         bossKey: bossKey.value,
         transparencyKey: transparencyKey.value,
+        workMonitor: workMonitor.value,
+        workMonitorAction: workMonitorAction.value,
+        workMonitorKeywords: workMonitorKeywords.value,
       }),
     );
   },
+  { deep: true },
 );
 
 // bossKey 改动 → 刷新所有 pip/popout 的窗口标题(标题里显示当前老板键)
@@ -150,6 +182,53 @@ watch(effectiveOpacity, (v) => {
   invoke("set_all_web_tabs_opacity", { opacity: v }).catch(() => {});
 });
 async function triggerBossKey() { await invoke("trigger_boss_key"); }
+
+// ────── M4: 伪装皮肤 ──────
+// 进入伪装:隐藏所有 web-tab 子窗(独立 OS 窗口不受覆盖层遮挡,不隐藏会穿帮),
+//   并临时把主壳恢复不透明(伪装成工作界面时半透明会露馅)。
+// 退出伪装:恢复透明度并把当前活跃 tab 显示回来。
+const disguiseAvailable = computed(() => auth.canUse("disguise"));
+
+async function enterDisguise() {
+  if (!disguiseAvailable.value) return;
+  disguise.activate();
+  showSettings.value = false;
+  await invoke("set_all_tabs_hidden", { hidden: true }).catch(() => {});
+  document.body.style.setProperty("--shell-alpha", "1");
+}
+
+async function exitDisguise() {
+  disguise.deactivate();
+  // 恢复用户设定的透明度
+  document.body.style.setProperty("--shell-alpha", String(effectiveOpacity.value));
+  const cur = tabs.active;
+  if (cur && cur.mode === "inline") {
+    await activateVisual(cur.id);
+  } else if (cur && (cur.mode === "pip" || cur.mode === "popout")) {
+    await invoke("set_web_tab_visible", { id: cur.id, visible: true }).catch(() => {});
+  }
+}
+
+function toggleDisguise() {
+  if (disguise.active) exitDisguise();
+  else enterDisguise();
+}
+
+// ────── M5: 工作进程监测 ──────
+// 把配置下发给 Rust 轮询线程;开关/关键字变化时立即同步。
+function pushWorkMonitorConfig() {
+  const enabled = workMonitor.value && auth.canUse("workMonitor");
+  invoke("set_work_monitor_config", {
+    enabled,
+    keywords: workMonitorKeywords.value,
+  }).catch(() => {});
+}
+watch([workMonitor, workMonitorKeywords, () => auth.canUse("workMonitor")], pushWorkMonitorConfig, {
+  deep: true,
+});
+/** M5 状态指示:当前是否检测到工作类应用在运行 */
+const workAppPresent = ref(false);
+
 
 // 设置打开时全部 tab 隐藏,关闭时按当前活跃恢复
 watch(showSettings, async (v) => {
@@ -608,10 +687,14 @@ let unlistenVideoFs: (() => void) | undefined;
 let unlistenPinSignal: (() => void) | undefined;
 let unlistenVideoPlay: (() => void) | undefined;
 let unlistenTranspToggle: (() => void) | undefined;
+let unlistenWorkApp: (() => void) | undefined;
+let unlistenWorkAppGone: (() => void) | undefined;
 let ro: ResizeObserver | undefined;
 
 onMounted(async () => {
   await nextTick();
+  // 鉴权状态初始化(异步拉取,不阻塞主窗口)
+  auth.init().catch(() => {});
   // 主窗口移动/缩放 → 根据当前 tab mode 同步
   const onWinChange = () => {
     const t = tabs.active;
@@ -632,6 +715,11 @@ onMounted(async () => {
     isHidden.value = evt.payload;
     // 恢复时 Windows ShowWindow 可能重置了 WS_EX_LAYERED,重新 apply 透明度
     if (!evt.payload) {
+      // 伪装态下按老板键恢复:一并退出伪装,回到真实摸鱼界面
+      if (disguise.active) {
+        exitDisguise();
+        return;
+      }
       invoke("set_all_web_tabs_opacity", { opacity: effectiveOpacity.value }).catch(() => {});
       document.body.style.setProperty("--shell-alpha", String(effectiveOpacity.value));
       // Rust 恢复时对 WEB_TABS 全部 show(),会露出非活跃的 inline tab;
@@ -701,6 +789,29 @@ onMounted(async () => {
   unlistenTranspToggle = await win.listen("transparency-toggle-requested", () => {
     bypassOpacity.value = !bypassOpacity.value;
   });
+  // M5: 检测到工作类应用启动 → 按配置切伪装或直接隐藏
+  unlistenWorkApp = await win.listen("work-app-detected", async () => {
+    workAppPresent.value = true;
+    if (!workMonitor.value || !auth.canUse("workMonitor")) return;
+    if (workMonitorAction.value === "hide") {
+      // 已经隐藏就不重复触发(trigger_boss_key 是 toggle 语义)
+      const hidden = await invoke<boolean>("is_hidden").catch(() => false);
+      if (!hidden) await invoke("trigger_boss_key").catch(() => {});
+    } else if (auth.canUse("disguise")) {
+      // 动作为伪装但无伪装权益时退化为隐藏,保证监测始终有效
+      if (!disguise.active) await enterDisguise();
+    } else {
+      const hidden = await invoke<boolean>("is_hidden").catch(() => false);
+      if (!hidden) await invoke("trigger_boss_key").catch(() => {});
+    }
+  });
+  // M5: 工作应用退出 → 不自动恢复(避免老板还在旁边时突然弹回摸鱼界面),
+  //     仅通知前端更新状态指示,由用户手动退出伪装。
+  unlistenWorkAppGone = await win.listen("work-app-gone", () => {
+    workAppPresent.value = false;
+  });
+  // 冷启动:把已保存的 M5 配置下发给 Rust 轮询线程
+  pushWorkMonitorConfig();
   // 冷启动:如已保存"取消透明"快捷键,注册回 Rust
   if (transparencyKey.value) {
     invoke("update_transparency_shortcut", { shortcut: transparencyKey.value }).catch(() => {});
@@ -737,6 +848,8 @@ onBeforeUnmount(() => {
   unlistenVideoPlay?.();
   unlistenTranspToggle?.();
   unlistenPinSignal?.();
+  unlistenWorkApp?.();
+  unlistenWorkAppGone?.();
   ro?.disconnect();
 });
 </script>
@@ -780,6 +893,12 @@ onBeforeUnmount(() => {
         >⋯</button>
         <button class="btn" @click="triggerBossKey" title="老板键">🚨</button>
         <button
+          v-if="disguiseAvailable"
+          class="btn"
+          @click="toggleDisguise"
+          title="伪装皮肤(VIP) · 进入后按 Esc 退出"
+        >🎭</button>
+        <button
           class="btn"
           :class="{ toggled: mainPinned }"
           @click="toggleMainPin"
@@ -801,11 +920,19 @@ onBeforeUnmount(() => {
       :boss-key="bossKey"
       :transparency-key="transparencyKey"
       :bypass-opacity="bypassOpacity"
+      :work-monitor="workMonitor"
+      :work-monitor-action="workMonitorAction"
+      :work-monitor-keywords="workMonitorKeywords"
+      :work-app-present="workAppPresent"
       @update:auto-hide="autoHide = $event"
       @update:auto-hide-delay="autoHideDelay = $event"
       @update:video-auto-landscape="videoAutoLandscape = $event"
       @update:boss-key="bossKey = $event"
       @update:transparency-key="transparencyKey = $event"
+      @update:work-monitor="workMonitor = $event"
+      @update:work-monitor-action="workMonitorAction = $event"
+      @update:work-monitor-keywords="workMonitorKeywords = $event"
+      @preview-disguise="enterDisguise"
       @close="showSettings = false"
     />
 
@@ -903,6 +1030,9 @@ onBeforeUnmount(() => {
     >↩ 退出全屏</button>
 
     <!-- 右键菜单已改为独立 Tauri 窗口(能盖住 web-tab),不在 DOM 里渲染 -->
+
+    <!-- M4 伪装皮肤覆盖层:盖住整个摸鱼界面 -->
+    <DisguiseOverlay v-if="disguise.active" @exit="exitDisguise" />
   </div>
 </template>
 

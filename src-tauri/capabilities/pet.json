@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet",
+  "description": "桌面宠物独立窗口:允许监听事件、拖动窗口、关闭自身",
+  "windows": ["pet"],
+  "webviews": ["pet"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "core:window:allow-set-position",
+    "core:window:allow-inner-position",
+    "core:window:allow-scale-factor",
+    "core:webview:allow-webview-close",
+    "allow-app-commands"
+  ]
+}

@@ -113,10 +113,74 @@ fn set_all_tabs_hidden(app: AppHandle, hidden: bool) {
     }
 }
 
+// ────── M4 阅读式伪装:往 web-tab 注入暗色等宽样式 ──────
+//
+// 与"遮蔽式"(DisguiseOverlay 全屏盖住)并存的第二种模式:
+// 只注入一个带固定 id 的 <style>,把网页染成 VSCode 暗色等宽观感,
+// 不改动页面 DOM 结构 —— 原有滚动/点击/翻页全部保留,移除 style 即完全还原。
+//
+// CSS 策略故意保守:只改配色/字体/行高,不动布局。
+// 图片/视频压到极低不透明度(而非 display:none,否则布局塌陷),这是伪装成立的关键。
+
+const READING_DISGUISE_CSS: &str = concat!(
+    "html,body{background:#1e1e1e !important;}",
+    "*{background-color:transparent !important;border-color:#3c3c3c !important;",
+    "color:#d4d4d4 !important;font-family:Consolas,\"Cascadia Code\",\"Courier New\",monospace !important;",
+    "text-shadow:none !important;box-shadow:none !important;}",
+    "a,a *{color:#569cd6 !important;}",
+    "h1,h2,h3,h4,h5,h6{color:#4ec9b0 !important;font-weight:600 !important;}",
+    "img,video,canvas,svg,iframe{opacity:.06 !important;filter:grayscale(1) !important;}",
+    "::selection{background:#264f78 !important;}",
+    "::-webkit-scrollbar{width:10px !important;}",
+    "::-webkit-scrollbar-thumb{background:#424242 !important;}",
+    "::-webkit-scrollbar-track{background:#1e1e1e !important;}",
+);
+
+const READING_DISGUISE_STYLE_ID: &str = "__moyu_disguise_style";
+
+/// 阅读式伪装:往所有 web-tab 注入 / 移除暗色等宽样式。
+/// 对已注入的窗口幂等(新开 tab 时可安全重复调用)。
+#[tauri::command]
+fn set_reading_disguise(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let js = if enabled {
+        format!(
+            r#"(function(){{
+                try {{
+                    if (document.getElementById('{id}')) return;
+                    var s = document.createElement('style');
+                    s.id = '{id}';
+                    s.textContent = {css};
+                    (document.head || document.documentElement).appendChild(s);
+                }} catch(e) {{}}
+            }})();"#,
+            id = READING_DISGUISE_STYLE_ID,
+            // serde_json 负责转义引号,避免手工拼 JS 字符串出错
+            css = serde_json::to_string(READING_DISGUISE_CSS).map_err(|e| e.to_string())?,
+        )
+    } else {
+        format!(
+            r#"(function(){{
+                try {{
+                    var s = document.getElementById('{id}');
+                    if (s) s.remove();
+                }} catch(e) {{}}
+            }})();"#,
+            id = READING_DISGUISE_STYLE_ID,
+        )
+    };
+
+    let labels = WEB_TABS.lock().map(|g| g.clone()).unwrap_or_default();
+    for l in labels {
+        if let Some(win) = app.get_webview_window(&l) {
+            let _ = win.eval(&js);
+        }
+    }
+    Ok(())
+}
+
 fn tab_label(id: &str) -> String {
     format!("web-tab-{id}")
 }
-
 fn remember_tab(label: String) {
     if let Ok(mut g) = WEB_TABS.lock() {
         if !g.iter().any(|l| l == &label) {
@@ -1071,6 +1135,286 @@ fn notify_web_tab_mode(app: AppHandle, id: String, mode: String, pinned: bool) -
     Ok(())
 }
 
+// ────── M8: 桌面宠物 ──────
+//
+// 老板键可配置为两种动作:直接隐藏(默认) 或 切换成桌面宠物。
+// 桌宠是一个紧贴宠物尺寸的小透明窗(不做全屏透明窗,避免遮挡桌面操作),
+// 复用右键菜单窗口已验证的参数组合:无边框 + 透明 + 不进任务栏 + 置顶 + 无阴影。
+//
+// 探测线程职责(仅在桌宠开着时工作):
+// - 鼠标位置 → emit `pet-cursor`,驱动视线跟随/走向鼠标
+// - 键盘活跃度 → emit `pet-typing`(仅 Windows)
+//   注意:只用 GetAsyncKeyState 判断"有没有键被按下",不记录任何按键内容,
+//   刻意不做键位统计,避免这个功能变成键盘记录器。
+
+const PET_LABEL: &str = "pet";
+
+/// 桌宠窗口当前是否开着
+static PET_MODE: AtomicBool = AtomicBool::new(false);
+/// 老板键动作:false=隐藏(默认) / true=切桌宠
+static BOSS_ACTION_PET: AtomicBool = AtomicBool::new(false);
+/// 探测线程是否应工作(仅桌宠开启期间为 true)
+static PET_PROBE_ON: AtomicBool = AtomicBool::new(false);
+/// 打字监控开关:关闭时探测线程完全不扫键盘
+static PET_TYPING_ON: AtomicBool = AtomicBool::new(true);
+/// 桌宠配置缓存 (width, height, query),由前端在启动时与配置变更时下发。
+///
+/// 老板键按下时 Rust 直接用它开窗,不再走"emit → 前端 → invoke"往返:
+/// 那条链有三个环节,任何一环断掉(事件丢失、前端异常、监听未就绪)
+/// 都会让老板键彻底失效 —— 对一个"救命键"来说不可接受。
+static PET_CONFIG: Mutex<Option<(f64, f64, String)>> = Mutex::new(None);
+
+/// 前端下发桌宠配置(种类/尺寸/台词已拼成 query)
+#[tauri::command]
+fn set_pet_config(width: f64, height: f64, query: String) {
+    if let Ok(mut g) = PET_CONFIG.lock() {
+        *g = Some((width, height, query));
+    }
+}
+
+/// 打字监控开关。关掉后探测线程不再扫键盘,也不再 emit `pet-typing`。
+#[tauri::command]
+fn set_pet_typing(on: bool) {
+    PET_TYPING_ON.store(on, Ordering::Relaxed);
+}
+
+/// 桌宠窗口置顶开关(右键菜单/设置页用)。async 同 `enter_pet_mode`。
+#[tauri::command]
+async fn set_pet_always_on_top(app: AppHandle, on: bool) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(PET_LABEL) {
+        win.set_always_on_top(on).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 改桌宠窗口尺寸(滚轮缩放 / 右键菜单选档)。
+///
+/// 缩放时保持窗口**底边中点**不动:桌宠是"站在"桌面某处的,
+/// 若按左上角锚点缩放,它会在放大时往右下方蹿走,手感很怪。
+///
+/// 必须是 async:同步命令跑在主线程,而 set_size/set_position 要靠
+/// 主线程事件循环继续转才能完成,在主线程里同步等就是自锁
+/// (本文件所有改窗命令都是 async,原因相同)。
+#[tauri::command]
+async fn set_pet_size(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let Some(win) = app.get_webview_window(PET_LABEL) else {
+        return Ok(());
+    };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    // 先读旧几何,算出底边中点,改完尺寸再按新尺寸反推左上角
+    let old_pos = win.outer_position().map_err(|e| e.to_string())?;
+    let old_size = win.outer_size().map_err(|e| e.to_string())?;
+    let anchor_x = old_pos.x as f64 / scale + old_size.width as f64 / scale / 2.0;
+    let anchor_y = old_pos.y as f64 / scale + old_size.height as f64 / scale;
+
+    win.set_size(LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+    win.set_position(LogicalPosition::new(anchor_x - width / 2.0, anchor_y - height))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 打开桌宠窗口的实际逻辑。
+///
+/// 抽成普通函数是为了让老板键回调能直接调用(它跑在快捷键线程,不是主线程),
+/// 而 #[tauri::command] 那层必须是 async —— 见 `enter_pet_mode` 的说明。
+fn do_enter_pet_mode(app: &AppHandle, width: f64, height: f64, query: &str) -> Result<(), String> {
+    // 已存在则只显示(幂等,避免重复建窗)。
+    // 这里刻意不改尺寸:窗口内部布局由前端按自己的 bodySize 排,
+    // 只改窗口不通知前端会错位;活跃期的尺寸同步走 pet-size-push 事件。
+    if let Some(existing) = app.get_webview_window(PET_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        PET_MODE.store(true, Ordering::Relaxed);
+        PET_PROBE_ON.store(true, Ordering::Relaxed);
+        return Ok(());
+    }
+
+    // 默认摆到主屏右下角内缩 40px;拿不到显示器信息时退回固定坐标
+    let (x, y) = match app.primary_monitor() {
+        Ok(Some(m)) => {
+            let scale = m.scale_factor();
+            let ms = m.size();
+            let w = ms.width as f64 / scale;
+            let h = ms.height as f64 / scale;
+            (w - width - 40.0, h - height - 80.0)
+        }
+        _ => (600.0, 400.0),
+    };
+
+    let url = format!("index.html?view=pet&{query}");
+    let parsed = WebviewUrl::App(url.clone().into());
+
+    if let Err(e) = WebviewWindowBuilder::new(app, PET_LABEL, parsed)
+        .decorations(false)
+        .transparent(true)
+        .resizable(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .shadow(false)
+        .inner_size(width, height)
+        .position(x, y)
+        .build()
+    {
+        eprintln!("[moyu] enter_pet_mode build failed: url={url} err={e}");
+        return Err(e.to_string());
+    }
+
+    PET_MODE.store(true, Ordering::Relaxed);
+    PET_PROBE_ON.store(true, Ordering::Relaxed);
+
+    // 语义与老板键一致:主窗和所有 tab 一起收起(tab 先静音再隐藏)
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.hide();
+    }
+    let labels = WEB_TABS.lock().map(|g| g.clone()).unwrap_or_default();
+    for l in labels {
+        apply_web_tab_mute(app, &l, true);
+        if let Some(win) = app.get_webview_window(&l) {
+            let _ = win.hide();
+        }
+    }
+    HIDDEN.store(true, Ordering::Relaxed);
+
+    Ok(())
+}
+
+/// 打开桌宠窗口。`width`/`height` 为窗口逻辑尺寸(高度含气泡留白),
+/// `query` 为前端拼好的配置 query string。
+///
+/// 必须是 async:同步命令跑在主线程,而 WebviewWindowBuilder::build()
+/// 要靠主线程事件循环继续转才能完成建窗,在主线程里同步等就是自锁
+/// —— 表现为整个应用无响应(本文件所有建窗命令都是 async,原因相同)。
+#[tauri::command]
+async fn enter_pet_mode(
+    app: AppHandle,
+    width: f64,
+    height: f64,
+    query: String,
+) -> Result<(), String> {
+    do_enter_pet_mode(&app, width, height, &query)
+}
+
+/// 关闭桌宠窗口并恢复摸鱼主窗的实际逻辑(同上,供老板键回调直接调用)。
+fn do_exit_pet_mode(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(PET_LABEL) {
+        let _ = win.close();
+    }
+    PET_MODE.store(false, Ordering::Relaxed);
+    PET_PROBE_ON.store(false, Ordering::Relaxed);
+
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
+    // 解除静音,并把子窗恢复为"可见"状态。
+    // 必须在这里 show():enter_pet_mode 时是 Rust 直接 hide() 的,
+    // 前端只会对活跃 tab 调 set_web_tab_visible(true),其余 tab 若停在 hidden
+    // 就会表现为"标签还在但里面没内容"。show() 后再由前端 restoreTabsVisual()
+    // 按各 tab 的 mode 收掉非活跃的 inline。
+    let labels = WEB_TABS.lock().map(|g| g.clone()).unwrap_or_default();
+    for l in labels {
+        apply_web_tab_mute(app, &l, false);
+        if let Some(win) = app.get_webview_window(&l) {
+            let _ = win.show();
+        }
+    }
+    HIDDEN.store(false, Ordering::Relaxed);
+
+    let _ = app.emit("pet-exited", ());
+}
+
+/// 关闭桌宠窗口并恢复摸鱼主窗。tab 的显示交给前端(它才知道每个 tab 的 mode)。
+/// async 的原因同 `enter_pet_mode`:close/show 都要主线程事件循环配合。
+#[tauri::command]
+async fn exit_pet_mode(app: AppHandle) -> Result<(), String> {
+    do_exit_pet_mode(&app);
+    Ok(())
+}
+
+/// 设置老板键触发时的动作(true=切桌宠 / false=隐藏)
+#[tauri::command]
+fn set_boss_action_pet(pet: bool) {
+    BOSS_ACTION_PET.store(pet, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn is_pet_mode() -> bool {
+    PET_MODE.load(Ordering::Relaxed)
+}
+
+/// 主动给桌宠推一句台词(设置页"试一下"、以及后续提醒场景用)
+#[tauri::command]
+fn pet_say(app: AppHandle, text: String) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(PET_LABEL) {
+        let _ = win.emit("pet-say", text);
+    }
+    Ok(())
+}
+
+/// 桌宠探测线程:220ms 一轮,只在桌宠开着时干活。
+/// 鼠标位移超过阈值才 emit,键盘只在活跃态翻转时 emit —— 都是为了别把事件刷爆。
+fn spawn_pet_probe(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut last_pos = (f64::MIN, f64::MIN);
+        let mut last_typing = false;
+        let mut idle_ticks: u32 = 0;
+
+        loop {
+            std::thread::sleep(Duration::from_millis(220));
+
+            if !PET_PROBE_ON.load(Ordering::Relaxed) {
+                last_pos = (f64::MIN, f64::MIN);
+                last_typing = false;
+                idle_ticks = 0;
+                continue;
+            }
+
+            // ── 鼠标位置 ──
+            if let Ok(p) = app.cursor_position() {
+                let moved = (p.x - last_pos.0).abs() > 6.0 || (p.y - last_pos.1).abs() > 6.0;
+                if moved {
+                    last_pos = (p.x, p.y);
+                    let _ = app.emit("pet-cursor", serde_json::json!({ "x": p.x, "y": p.y }));
+                }
+            }
+
+            // ── 键盘活跃度(仅 Windows,且用户开启了打字监控) ──
+            #[cfg(windows)]
+            if PET_TYPING_ON.load(Ordering::Relaxed) {
+                use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+                // 只扫常用输入键区(字母/数字/符号/空格/回退),不含鼠标键与修饰键单击
+                let mut pressed = false;
+                for vk in 0x08u32..=0xDEu32 {
+                    // 跳过鼠标键(0x01-0x06)已在范围外;跳过 F 区无所谓,误判成本低
+                    let st = unsafe { GetAsyncKeyState(vk as i32) };
+                    if (st as u16 & 0x8000) != 0 {
+                        pressed = true;
+                        break;
+                    }
+                }
+
+                if pressed {
+                    idle_ticks = 0;
+                    if !last_typing {
+                        last_typing = true;
+                        let _ = app.emit("pet-typing", true);
+                    }
+                } else if last_typing {
+                    idle_ticks += 1;
+                    // 约 2.6 秒无输入才判定停止打字(220ms × 12),避免打字间隙来回翻转
+                    if idle_ticks >= 12 {
+                        last_typing = false;
+                        idle_ticks = 0;
+                        let _ = app.emit("pet-typing", false);
+                    }
+                }
+            }
+        }
+    });
+}
+
 // ────── 入口 ──────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1091,7 +1435,40 @@ pub fn run() {
                             .map(|s| &s == shortcut)
                             .unwrap_or_else(|| shortcut == &default_boss_for_handler);
                         if is_boss {
-                            toggle_hide(app);
+                            // 老板键动作分流。桌宠由 Rust 直接开窗:配置已由前端预先
+                            // 下发到 PET_CONFIG,不依赖任何前端往返 —— 老板键是救命键,
+                            // 不能因为前端没响应就整个失效。
+                            let want_pet = BOSS_ACTION_PET.load(Ordering::Relaxed);
+                            let in_pet = PET_MODE.load(Ordering::Relaxed);
+                            if want_pet {
+                                if in_pet {
+                                    do_exit_pet_mode(app);
+                                } else {
+                                    let cfg = PET_CONFIG.lock().ok().and_then(|g| g.clone());
+                                    let opened = match cfg {
+                                        Some((width, height, query)) => {
+                                            match do_enter_pet_mode(app, width, height, &query) {
+                                                Ok(()) => true,
+                                                Err(e) => {
+                                                    eprintln!("[moyu] enter_pet_mode failed: {e}");
+                                                    false
+                                                }
+                                            }
+                                        }
+                                        None => {
+                                            eprintln!("[moyu] pet config missing, fallback to hide");
+                                            false
+                                        }
+                                    };
+                                    // 开窗失败必须退化为隐藏:宁可少个宠物,
+                                    // 也不能让用户以为按了键、实际屏幕纹丝不动。
+                                    if !opened {
+                                        toggle_hide(app);
+                                    }
+                                }
+                            } else {
+                                toggle_hide(app);
+                            }
                             return;
                         }
                         let is_transp = CURRENT_TRANSPARENCY_KEY
@@ -1143,6 +1520,16 @@ pub fn run() {
             notify_web_tab_mode,
             set_work_monitor_config,
             set_all_tabs_hidden,
+            set_reading_disguise,
+            enter_pet_mode,
+            exit_pet_mode,
+            set_boss_action_pet,
+            set_pet_config,
+            set_pet_size,
+            set_pet_always_on_top,
+            set_pet_typing,
+            is_pet_mode,
+            pet_say,
         ])
         .setup(move |app| {
             if let Some(win) = app.get_webview_window("main") {
@@ -1158,6 +1545,8 @@ pub fn run() {
             }
             // M5: 启动工作进程监测轮询线程(默认关闭,前端下发配置后生效)
             spawn_work_monitor(app.handle().clone());
+            // M8: 启动桌宠探测线程(默认关闭,开桌宠后生效)
+            spawn_pet_probe(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -1,13 +1,15 @@
 // 鉴权服务层 —— 当前为 mock 实现,真实后端接入时只需替换本文件,保持导出接口不变。
 // M4(伪装皮肤) / M5(工作进程监测) 为 VIP 功能,统一通过本服务判断权益。
 
-export type VipFeature = "disguise" | "workMonitor";
+export type VipFeature = "disguise" | "workMonitor" | "pet";
 
 export interface VipEntitlements {
   /** M4:伪装皮肤 */
   disguise: boolean;
   /** M5:工作监测自动隐藏 */
   workMonitor: boolean;
+  /** M8:桌面宠物 */
+  pet: boolean;
 }
 
 export interface AuthUser {
@@ -50,7 +52,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 function entitlementsFor(isVip: boolean): VipEntitlements {
   // 当前 VIP 即拥有全部付费功能;后续若按功能单独售卖,在这里细化。
-  return { disguise: isVip, workMonitor: isVip };
+  return { disguise: isVip, workMonitor: isVip, pet: isVip };
 }
 
 function isVipActive(status: AuthStatus): boolean {

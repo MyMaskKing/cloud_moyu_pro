@@ -3,20 +3,24 @@ import { ref, computed } from "vue";
 
 export type DisguiseSkin = "vscode" | "excel" | "ppt";
 
+/** 伪装模式:cover=遮蔽式(内容全盖住,防看最强) / reading=阅读式(内容仍可读,可继续摸鱼) */
+export type DisguiseMode = "cover" | "reading";
+
 const STORAGE_KEY = "moyu-disguise-v1";
 
 interface Persisted {
   skin: DisguiseSkin;
+  mode: DisguiseMode;
 }
 
 function loadPersisted(): Persisted {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { skin: "vscode", ...JSON.parse(raw) };
+    if (raw) return { skin: "vscode", mode: "cover", ...JSON.parse(raw) };
   } catch {
     /* ignore */
   }
-  return { skin: "vscode" };
+  return { skin: "vscode", mode: "cover" };
 }
 
 /**
@@ -27,13 +31,23 @@ function loadPersisted(): Persisted {
 export const useDisguiseStore = defineStore("disguise", () => {
   const persisted = loadPersisted();
   const skin = ref<DisguiseSkin>(persisted.skin);
+  const mode = ref<DisguiseMode>(persisted.mode);
   const active = ref(false);
 
   const isActive = computed(() => active.value);
 
+  function persist() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ skin: skin.value, mode: mode.value }));
+  }
+
   function setSkin(s: DisguiseSkin) {
     skin.value = s;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ skin: s }));
+    persist();
+  }
+
+  function setMode(m: DisguiseMode) {
+    mode.value = m;
+    persist();
   }
 
   function activate(s?: DisguiseSkin) {
@@ -50,5 +64,5 @@ export const useDisguiseStore = defineStore("disguise", () => {
     else activate(s);
   }
 
-  return { skin, active, isActive, setSkin, activate, deactivate, toggle };
+  return { skin, mode, active, isActive, setSkin, setMode, activate, deactivate, toggle };
 });

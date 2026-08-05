@@ -3,11 +3,14 @@ import { ref, onMounted, onBeforeUnmount, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAuthStore } from "../stores/auth";
 import { useDisguiseStore } from "../stores/disguise";
-import type { DisguiseSkin } from "../stores/disguise";
+import type { DisguiseSkin, DisguiseMode } from "../stores/disguise";
+import { usePetStore, PET_MIN, PET_MAX, DEFAULT_PET_LINES } from "../stores/pet";
+import type { PetKind } from "../stores/pet";
 import VipLock from "../components/VipLock.vue";
 
 const auth = useAuthStore();
 const disguise = useDisguiseStore();
+const pet = usePetStore();
 
 // ────── M4 皮肤选择 ──────
 const SKINS: { key: DisguiseSkin; name: string; desc: string }[] = [
@@ -17,6 +20,44 @@ const SKINS: { key: DisguiseSkin; name: string; desc: string }[] = [
 ];
 function pickSkin(s: DisguiseSkin) {
   disguise.setSkin(s);
+}
+function pickMode(m: DisguiseMode) {
+  disguise.setMode(m);
+}
+
+// ────── M8 桌面宠物 ──────
+const PETS: { key: PetKind; name: string; desc: string; emoji: string }[] = [
+  { key: "cat",   name: "白猫",   desc: "粗描边简笔,敲键盘主力", emoji: "🐱" },
+  { key: "capy",  name: "水豚",   desc: "顶着橘子,一脸躺平",     emoji: "🧡" },
+  { key: "shiba", name: "柴犬",   desc: "白脸 mask,吐舌头",      emoji: "🐕" },
+  { key: "duck",  name: "小黄鸭", desc: "摇摆走路,大扁嘴",       emoji: "🦆" },
+];
+/** 打字反应依赖 Windows API,其它平台需系统辅助功能权限,暂不支持 */
+const typingSupported = navigator.userAgent.includes("Windows");
+
+function onSizeInput(e: Event) {
+  pet.setSize(Number((e.target as HTMLInputElement).value));
+}
+
+const newLine = ref("");
+function addLine() {
+  const t = newLine.value.trim();
+  if (!t) return;
+  if (pet.lines.includes(t)) {
+    newLine.value = "";
+    return;
+  }
+  pet.setLines([...pet.lines, t]);
+  newLine.value = "";
+}
+function removeLine(t: string) {
+  pet.setLines(pet.lines.filter((x) => x !== t));
+}
+function resetLines() {
+  pet.setLines([...DEFAULT_PET_LINES]);
+}
+function onBossAction(a: "hide" | "pet") {
+  emit("update:bossAction", a);
 }
 
 // ────── M5 关键字编辑 ──────
@@ -46,6 +87,7 @@ const props = defineProps<{
   workMonitorAction: "disguise" | "hide";
   workMonitorKeywords: string[];
   workAppPresent: boolean;
+  bossAction: "hide" | "pet";
 }>();
 
 const emit = defineEmits<{
@@ -57,7 +99,9 @@ const emit = defineEmits<{
   (e: "update:workMonitor", v: boolean): void;
   (e: "update:workMonitorAction", v: "disguise" | "hide"): void;
   (e: "update:workMonitorKeywords", v: string[]): void;
+  (e: "update:bossAction", v: "hide" | "pet"): void;
   (e: "previewDisguise"): void;
+  (e: "previewPet"): void;
   (e: "close"): void;
 }>();
 
@@ -308,6 +352,31 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
               <span class="hint">按 Esc 取消</span>
             </template>
           </div>
+
+          <!-- 触发动作:直接隐藏 / 变成桌面宠物 -->
+          <div class="row" style="align-items:flex-start">
+            <span class="label">触发动作</span>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label class="radio">
+                <input
+                  type="radio"
+                  :checked="bossAction === 'hide'"
+                  @change="onBossAction('hide')"
+                />
+                <span>直接隐藏 —— 应用瞬间消失</span>
+              </label>
+              <label class="radio" :class="{ locked: !auth.canUse('pet') }">
+                <input
+                  type="radio"
+                  :checked="bossAction === 'pet'"
+                  :disabled="!auth.canUse('pet')"
+                  @change="onBossAction('pet')"
+                />
+                <span>变成桌面宠物 <span class="vip-tag">VIP</span> —— 摸鱼窗口收起,桌面留一只小宠物</span>
+              </label>
+              <span v-if="!auth.canUse('pet')" class="hint">桌宠为 VIP 功能,未开通时按老板键仍走"直接隐藏"</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -408,21 +477,173 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
         </div>
         <div class="group-content">
           <VipLock feature="disguise" @unlock="onUnlockVip">
-            <div class="skin-list">
-              <div
-                v-for="s in SKINS"
-                :key="s.key"
-                class="skin-card"
-                :class="{ act: disguise.skin === s.key }"
-                @click="pickSkin(s.key)"
-              >
-                <div class="skin-name">{{ s.name }}</div>
-                <div class="skin-desc">{{ s.desc }}</div>
+            <!-- 伪装模式:遮蔽式 / 阅读式 -->
+            <div class="row" style="align-items:flex-start">
+              <span class="label">伪装模式</span>
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <label class="radio">
+                  <input type="radio" :checked="disguise.mode === 'cover'" @change="pickMode('cover')" />
+                  <span>遮蔽式 —— 全部盖住,防看最强,摸鱼中断</span>
+                </label>
+                <label class="radio">
+                  <input type="radio" :checked="disguise.mode === 'reading'" @change="pickMode('reading')" />
+                  <span>阅读式 —— 内容仍可读可翻页,防看较弱</span>
+                </label>
               </div>
             </div>
+
+            <template v-if="disguise.mode === 'cover'">
+              <div class="skin-list">
+                <div
+                  v-for="s in SKINS"
+                  :key="s.key"
+                  class="skin-card"
+                  :class="{ act: disguise.skin === s.key }"
+                  @click="pickSkin(s.key)"
+                >
+                  <div class="skin-name">{{ s.name }}</div>
+                  <div class="skin-desc">{{ s.desc }}</div>
+                </div>
+              </div>
+            </template>
+            <div v-else class="row hint-row">
+              <span class="hint">
+                阅读式把网页染成 VSCode 暗色等宽观感,图片/视频压到几乎不可见。
+                对小说、文章类站点有效;视频站基本没法看,建议那时改用遮蔽式。
+              </span>
+            </div>
+
             <div class="row actions">
               <button class="btn primary" @click="emit('previewDisguise')">▶ 立即伪装</button>
-              <span class="hint">当前皮肤:{{ SKINS.find(x => x.key === disguise.skin)?.name }}</span>
+              <span class="hint">
+                {{ disguise.mode === 'cover'
+                  ? '当前皮肤:' + (SKINS.find(x => x.key === disguise.skin)?.name ?? '')
+                  : '当前:阅读式' }}
+              </span>
+            </div>
+          </VipLock>
+        </div>
+      </div>
+
+      <!-- M8 桌面宠物 (VIP) -->
+      <div class="group">
+        <div class="group-title">🐾 桌面宠物 <span class="vip-tag">VIP</span></div>
+        <div class="group-desc">
+          把老板快捷键的动作设为"变成桌面宠物",按下后摸鱼窗口收起,桌面只留一只小宠物。
+          <b>单击</b>轮流触发跳跃 / 压扁 / 抖动并冒一句话;<b>双击</b>恢复摸鱼界面;
+          <b>拖动</b>放到哪就停在哪;<b>滚轮</b>缩放;<b>右键</b>调大小与置顶。
+        </div>
+        <div class="group-content">
+          <VipLock feature="pet" @unlock="onUnlockVip">
+            <div class="skin-list">
+              <div
+                v-for="p in PETS"
+                :key="p.key"
+                class="skin-card"
+                :class="{ act: pet.kind === p.key }"
+                @click="pet.setKind(p.key)"
+              >
+                <div class="skin-name">{{ p.emoji }} {{ p.name }}</div>
+                <div class="skin-desc">{{ p.desc }}</div>
+              </div>
+            </div>
+
+            <div class="row">
+              <span class="label">大小</span>
+              <input
+                class="size-range"
+                type="range"
+                :min="PET_MIN"
+                :max="PET_MAX"
+                step="2"
+                :value="pet.size"
+                @input="onSizeInput"
+              />
+              <span class="hint">{{ pet.size }} px · 桌面上滚轮也能调</span>
+            </div>
+
+            <div class="row">
+              <span class="label">窗口置顶</span>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="pet.alwaysOnTop"
+                  @change="pet.setAlwaysOnTop(($event.target as HTMLInputElement).checked)"
+                />
+                <span class="slider"></span>
+              </label>
+              <span class="hint">关掉后宠物会被其它窗口挡住</span>
+            </div>
+
+            <div class="row">
+              <span class="label">视线跟随</span>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="pet.followMouse"
+                  @change="pet.setFollowMouse(($event.target as HTMLInputElement).checked)"
+                />
+                <span class="slider"></span>
+              </label>
+              <span class="hint">眼睛跟着鼠标转(宠物不会自己移动,位置始终由你拖拽决定)</span>
+            </div>
+
+            <div class="row">
+              <span class="label">偶尔转身</span>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="pet.wander"
+                  @change="pet.setWander(($event.target as HTMLInputElement).checked)"
+                />
+                <span class="slider"></span>
+              </label>
+              <span class="hint">待着无聊时原地换个朝向</span>
+            </div>
+
+            <div class="row">
+              <span class="label">监控键盘</span>
+              <label class="switch" :class="{ locked: !typingSupported }">
+                <input
+                  type="checkbox"
+                  :checked="pet.typingReact && typingSupported"
+                  :disabled="!typingSupported"
+                  @change="pet.setTypingReact(($event.target as HTMLInputElement).checked)"
+                />
+                <span class="slider"></span>
+              </label>
+              <span class="hint">
+                {{ typingSupported
+                  ? '你一打字宠物就掏出键盘跟着敲(只感知有没有输入,不记录按了什么键)'
+                  : 'macOS 需系统辅助功能权限,暂不支持' }}
+              </span>
+            </div>
+
+            <div class="row" style="align-items:flex-start">
+              <span class="label">台词库</span>
+              <div style="flex:1;min-width:0">
+                <div class="kw-box">
+                  <span v-for="l in pet.lines" :key="l" class="kw">
+                    {{ l }}
+                    <span class="kw-x" @click="removeLine(l)">×</span>
+                  </span>
+                </div>
+                <div class="row" style="margin-top:6px">
+                  <input
+                    v-model="newLine"
+                    class="text-input"
+                    placeholder="新台词,回车添加"
+                    @keydown.enter.prevent="addLine"
+                  />
+                  <button class="btn" @click="addLine">＋ 添加</button>
+                  <button class="btn" @click="resetLines">恢复默认</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="row actions">
+              <button class="btn primary" @click="emit('previewPet')">▶ 试一下</button>
+              <span class="hint">双击宠物或右键"退出桌宠"可收回;老板键也能切回</span>
             </div>
           </VipLock>
         </div>
@@ -674,6 +895,14 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
   outline: none;
 }
 .text-input:focus { border-color: #58a6ff; }
+.size-range {
+  width: 160px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  accent-color: #58a6ff;
+  cursor: pointer;
+}
 .hint.error { color: #f85149; }
 .vip-badge {
   font-size: 12px;
@@ -758,4 +987,10 @@ code {
   cursor: pointer;
 }
 .radio input { accent-color: #58a6ff; }
+/* 无权益 / 平台不支持:置灰但仍可见,让用户知道有这个能力 */
+.radio.locked,
+.switch.locked {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 </style>

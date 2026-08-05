@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick, watch, computed } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { emit as emitEvent } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { useMouseAutoHide } from "./composables/useMouseAutoHide";
 import { useTabsStore } from "./stores/tabs";
@@ -10,6 +11,7 @@ import SettingsView from "./views/SettingsView.vue";
 import TabBar from "./components/TabBar.vue";
 import { useAuthStore } from "./stores/auth";
 import { useDisguiseStore } from "./stores/disguise";
+import { usePetStore, PET_BUBBLE_H } from "./stores/pet";
 import DisguiseOverlay from "./components/DisguiseOverlay.vue";
 
 // ────── 窗口 / 全局设置 ──────
@@ -21,10 +23,13 @@ const tabs = useTabsStore();
 const sitesStore = useSitesStore();
 const auth = useAuthStore();
 const disguise = useDisguiseStore();
+const pet = usePetStore();
 
 const STORAGE_KEY = "moyu-settings-v1";
 /** M5 检测到工作应用后执行的动作 */
 type WorkAction = "disguise" | "hide";
+/** M8 老板键触发时的动作 */
+type BossAction = "hide" | "pet";
 interface Settings {
   autoHide: boolean;
   autoHideDelay: number;
@@ -37,6 +42,8 @@ interface Settings {
   workMonitorAction: WorkAction;
   /** M5:进程关键字(大小写不敏感子串匹配) */
   workMonitorKeywords: string[];
+  /** M8:老板键动作 —— 直接隐藏 / 变成桌面宠物 */
+  bossAction: BossAction;
 }
 const DEFAULT_WORK_KEYWORDS = [
   "dingtalk", "钉钉",
@@ -55,6 +62,7 @@ const defaults: Settings = {
   workMonitor: false,
   workMonitorAction: "disguise",
   workMonitorKeywords: [...DEFAULT_WORK_KEYWORDS],
+  bossAction: "hide",
 };
 const loaded: Settings = (() => {
   try {
@@ -71,6 +79,7 @@ const transparencyKey = ref(loaded.transparencyKey);
 const workMonitor = ref(loaded.workMonitor);
 const workMonitorAction = ref<WorkAction>(loaded.workMonitorAction);
 const workMonitorKeywords = ref<string[]>(loaded.workMonitorKeywords);
+const bossAction = ref<BossAction>(loaded.bossAction);
 /** 摸鱼主窗口是否置顶 */
 const mainPinned = ref(false);
 /** 透明度临时绕过:快捷键翻转;true = 强制不透明(方便操作),不改动 opacity 存的值 */
@@ -92,7 +101,7 @@ const popoutTitle = (t: { title?: string; url: string }) =>
 
 watch(
   [autoHide, autoHideDelay, videoAutoLandscape, bossKey, transparencyKey,
-   workMonitor, workMonitorAction, workMonitorKeywords],
+   workMonitor, workMonitorAction, workMonitorKeywords, bossAction],
   () => {
     localStorage.setItem(
       STORAGE_KEY,
@@ -105,6 +114,7 @@ watch(
         workMonitor: workMonitor.value,
         workMonitorAction: workMonitorAction.value,
         workMonitorKeywords: workMonitorKeywords.value,
+        bossAction: bossAction.value,
       }),
     );
   },
@@ -184,23 +194,41 @@ watch(effectiveOpacity, (v) => {
 async function triggerBossKey() { await invoke("trigger_boss_key"); }
 
 // ────── M4: 伪装皮肤 ──────
-// 进入伪装:隐藏所有 web-tab 子窗(独立 OS 窗口不受覆盖层遮挡,不隐藏会穿帮),
-//   并临时把主壳恢复不透明(伪装成工作界面时半透明会露馅)。
-// 退出伪装:恢复透明度并把当前活跃 tab 显示回来。
+// 两种并存模式(设置里切换):
+//   cover   遮蔽式:DisguiseOverlay 全屏盖住;必须隐藏所有 web-tab 子窗(独立 OS 窗口
+//           不受 DOM 覆盖层遮挡,不隐藏会穿帮),并临时恢复不透明(半透明会露馅)。
+//   reading 阅读式:不盖内容,往各 web-tab 注入暗色等宽样式,原有滚动/点击全部保留。
 const disguiseAvailable = computed(() => auth.canUse("disguise"));
 
 async function enterDisguise() {
   if (!disguiseAvailable.value) return;
   disguise.activate();
+  // 遮蔽式要把 tab 全收起,与进桌宠同理:先置 collapsing 再关设置页,
+  // 否则关设置页的恢复链会和 set_all_tabs_hidden 并发,把 tab 亮回来。
+  const willHideTabs = disguise.mode !== "reading";
+  if (willHideTabs) collapsing.value = true;
   showSettings.value = false;
-  await invoke("set_all_tabs_hidden", { hidden: true }).catch(() => {});
-  document.body.style.setProperty("--shell-alpha", "1");
+  try {
+    if (disguise.mode === "reading") {
+      await invoke("set_reading_disguise", { enabled: true }).catch(() => {});
+    } else {
+      await invoke("set_all_tabs_hidden", { hidden: true }).catch(() => {});
+    }
+    document.body.style.setProperty("--shell-alpha", "1");
+  } finally {
+    if (willHideTabs) collapsing.value = false;
+  }
 }
 
 async function exitDisguise() {
+  const wasReading = disguise.mode === "reading";
   disguise.deactivate();
   // 恢复用户设定的透明度
   document.body.style.setProperty("--shell-alpha", String(effectiveOpacity.value));
+  if (wasReading) {
+    await invoke("set_reading_disguise", { enabled: false }).catch(() => {});
+    return;
+  }
   const cur = tabs.active;
   if (cur && cur.mode === "inline") {
     await activateVisual(cur.id);
@@ -212,6 +240,130 @@ async function exitDisguise() {
 function toggleDisguise() {
   if (disguise.active) exitDisguise();
   else enterDisguise();
+}
+
+// ────── M8: 桌面宠物 ──────
+// 老板键动作可选"直接隐藏"(默认)或"变成桌面宠物"。
+// 桌宠配置由这里预先下发给 Rust(set_pet_config),老板键按下时 Rust 直接开窗,
+// 不依赖前端往返 —— 前端没响应也不能让老板键失效。
+const petAvailable = computed(() => auth.canUse("pet"));
+
+/** 桌宠窗口尺寸:高度要为气泡多留一段,否则气泡会被窗口边界裁掉 */
+function petWindowSize() {
+  return { width: pet.size, height: pet.size + PET_BUBBLE_H };
+}
+
+/** 把 pet store 配置拼成桌宠窗口的 URL query */
+function buildPetQuery(): string {
+  const q = new URLSearchParams();
+  q.set("kind", pet.kind);
+  q.set("size", String(pet.size));
+  q.set("follow", pet.followMouse ? "1" : "0");
+  q.set("wander", pet.wander ? "1" : "0");
+  q.set("top", pet.alwaysOnTop ? "1" : "0");
+  // URLSearchParams.set 自己会做编码,这里不能再套 encodeURIComponent(会双重编码)
+  q.set("lines", JSON.stringify(pet.lines));
+  return q.toString();
+}
+
+async function enterPetMode() {
+  if (!petAvailable.value) return;
+  // 必须在关设置页之前置位:关设置页的 watcher 会去恢复 tab 显示,
+  // 那条链与 Rust 的批量 hide() 并发,不让路就会把 tab 亮回来。
+  collapsing.value = true;
+  showSettings.value = false;
+  try {
+    const { width, height } = petWindowSize();
+    await invoke("enter_pet_mode", { width, height, query: buildPetQuery() });
+    pet.setActive(true);
+    isHidden.value = true;
+    // 建窗时一律 always_on_top(true),这里按用户配置校正
+    if (!pet.alwaysOnTop) {
+      await invoke("set_pet_always_on_top", { on: false }).catch(() => {});
+    }
+    // Rust 已 hide 全部 tab,但设置页 watcher 那条链可能已抢先 show 过某个 tab。
+    // 这里以"桌宠已开"为准兜一遍,保证屏幕上只剩宠物。
+    for (const t of tabs.tabs) {
+      if (t.mode !== "pip") {
+        await invoke("set_web_tab_visible", { id: t.id, visible: false }).catch(() => {});
+      }
+    }
+  } catch (e) {
+    // 开窗失败不能让用户"既没隐藏也没宠物"地暴露在屏幕上:
+    // 退化为直接隐藏,保证老板键始终有效。
+    console.error("[moyu] enter_pet_mode failed:", e);
+    const hidden = await invoke<boolean>("is_hidden").catch(() => false);
+    if (!hidden) await invoke("trigger_boss_key").catch(() => {});
+  } finally {
+    collapsing.value = false;
+  }
+}
+
+// 老板键动作与桌宠配置都预先下发给 Rust:
+// 老板键按下时由 Rust 直接开窗,不依赖前端往返(前端没响应也不能让老板键失效)。
+// 无权益时下发 pet:false,自动降级为"直接隐藏"(与 M5 降级策略一致)。
+watch([bossAction, petAvailable], () => {
+  invoke("set_boss_action_pet", {
+    pet: bossAction.value === "pet" && petAvailable.value,
+  }).catch(() => {});
+}, { immediate: true });
+
+watch(
+  [
+    () => pet.kind, () => pet.size, () => pet.followMouse,
+    () => pet.wander, () => pet.alwaysOnTop, () => pet.lines,
+  ],
+  () => {
+    const { width, height } = petWindowSize();
+    invoke("set_pet_config", { width, height, query: buildPetQuery() }).catch(() => {});
+  },
+  { deep: true, immediate: true },
+);
+
+// 打字监控开关下发:关掉后 Rust 探测线程完全不扫键盘。
+// 无权益时按关处理 —— 键盘探测是敏感能力,没买会员就不该跑。
+watch([() => pet.typingReact, petAvailable], () => {
+  invoke("set_pet_typing", { on: pet.typingReact && petAvailable.value }).catch(() => {});
+}, { immediate: true });
+
+// 桌宠已开着时,设置页改尺寸/置顶要立刻生效,不然得关掉重开才看得到。
+// 尺寸走事件让桌宠窗自己改(它要同步内部布局);置顶直接调命令。
+// 注意:桌宠窗自己改完也会回写 store 触发这里,但值相同时两侧都会提前返回,不会循环。
+watch(() => pet.size, (n) => {
+  if (!pet.active) return;
+  emitEvent("pet-size-push", n).catch(() => {});
+});
+watch(() => pet.alwaysOnTop, (on) => {
+  if (!pet.active) return;
+  invoke("set_pet_always_on_top", { on }).catch(() => {});
+});
+
+/**
+ * 从"全部隐藏"状态恢复后重整 tab 显隐。
+ * Rust 恢复时会对 WEB_TABS 全部 show(),会露出非活跃的 inline tab;
+ * 这里接管:让当前 active(如果是 inline)显示,其余 inline 再隐藏;popout/pip 保持原样。
+ */
+async function restoreTabsVisual() {
+  // 设置页开着时它占满整个主壳,任何 tab 显示出来都会盖在它上面。
+  // Rust 恢复时对 WEB_TABS 全部 show() 了,这里必须把它们全收回去。
+  if (showSettings.value) {
+    for (const t of tabs.tabs) {
+      if (t.mode !== "pip") {
+        await invoke("set_web_tab_visible", { id: t.id, visible: false }).catch(() => {});
+      }
+    }
+    return;
+  }
+  const cur = tabs.active;
+  if (cur && cur.mode === "inline") {
+    await activateVisual(cur.id);
+  } else {
+    for (const other of tabs.tabs) {
+      if (other.mode === "inline") {
+        await invoke("set_web_tab_visible", { id: other.id, visible: false }).catch(() => {});
+      }
+    }
+  }
 }
 
 // ────── M5: 工作进程监测 ──────
@@ -230,14 +382,32 @@ watch([workMonitor, workMonitorKeywords, () => auth.canUse("workMonitor")], push
 const workAppPresent = ref(false);
 
 
+/**
+ * 「正在收起一切」标志(进桌宠 / 进隐藏)。
+ *
+ * 这类动作会先关掉设置页,而关设置页的 watcher 默认要"恢复活跃 tab 显示"——
+ * 它和 Rust 侧的批量 hide() 是两条并发链,show 落在 hide 之后 tab 就又露出来了。
+ * 收起期间置 true,让恢复逻辑整体让路。
+ */
+const collapsing = ref(false);
+
 // 设置打开时全部 tab 隐藏,关闭时按当前活跃恢复
 watch(showSettings, async (v) => {
   if (v) {
     for (const t of tabs.tabs) {
       if (t.mode !== "pip") await invoke("set_web_tab_visible", { id: t.id, visible: false }).catch(() => {});
     }
-  } else if (tabs.active && tabs.active.mode === "inline") {
+    // 上面逐个 await 期间可能有 activateVisual 并发把某个 tab 又 show 出来。
+    // 设置页是全屏视图,这里再兜一遍,确保它永远是最后的权威。
+    if (showSettings.value) {
+      for (const t of tabs.tabs) {
+        if (t.mode !== "pip") await invoke("set_web_tab_visible", { id: t.id, visible: false }).catch(() => {});
+      }
+    }
+  } else if (!collapsing.value && tabs.active && tabs.active.mode === "inline") {
     await syncCurrentTab();
+    // 上面 await 期间可能已经开始收起(进桌宠/隐藏),再判一次才不会把 tab 亮回来
+    if (collapsing.value) return;
     await invoke("set_web_tab_visible", { id: tabs.active.id, visible: true }).catch(() => {});
   }
 });
@@ -291,14 +461,23 @@ async function activateVisual(id: string) {
   // 1) 先把当前 tab 摆到 holder 位置(此时可能还没显示,不影响)
   await syncCurrentTab();
   // 2) 只对 inline/fullscreen 的 tab 做隐藏切换;popout/pip 是脱离主壳的浮动窗口,不动
+  //    注意:上面几个 await 期间用户可能已经打开了设置页(它占满主壳),
+  //    此时任何 show 都会盖在设置页上,所以这里必须重新判定而不能只信入口状态。
+  const shouldShow = !showSettings.value;
   for (const other of tabs.tabs) {
     if (other.mode === "pip" || other.mode === "popout") continue;
-    await invoke("set_web_tab_visible", { id: other.id, visible: other.id === id }).catch(() => {});
+    const visible = shouldShow && other.id === id;
+    await invoke("set_web_tab_visible", { id: other.id, visible }).catch(() => {});
   }
+  if (!shouldShow) return;
   // 3) 再 sync 一次,防止 show 触发的 layout 抖动导致位置飘
   await syncCurrentTab();
   // 4) focus 让子窗口接收键鼠事件(Windows 上 show 不自动 focus)
   await invoke("focus_web_tab", { id }).catch(() => {});
+  // 5) 阅读式伪装进行中:新建/切换的 tab 需补注入样式(命令对已注入的窗口幂等)
+  if (disguise.active && disguise.mode === "reading") {
+    await invoke("set_reading_disguise", { enabled: true }).catch(() => {});
+  }
 }
 
 async function openSite(url: string, hint?: { name: string; icon: string }) {
@@ -491,6 +670,9 @@ async function openTitlebarMenu(e: MouseEvent) {
 }
 
 async function pickContextMenu(key: string) {
+  // 桌宠窗口的菜单也走同一个独立菜单窗口,pick 事件是全局广播的;
+  // pet: 前缀那批由桌宠自己处理,主窗必须放过,否则会被当成 tab 操作。
+  if (key.startsWith("pet:")) return;
   const targetId = pendingCtxTargetId ?? tabs.active?.id ?? null;
   pendingCtxTargetId = null;
   if (!targetId) return;
@@ -689,6 +871,9 @@ let unlistenVideoPlay: (() => void) | undefined;
 let unlistenTranspToggle: (() => void) | undefined;
 let unlistenWorkApp: (() => void) | undefined;
 let unlistenWorkAppGone: (() => void) | undefined;
+let unlistenPetExited: (() => void) | undefined;
+let unlistenPetSize: (() => void) | undefined;
+let unlistenPetTop: (() => void) | undefined;
 let ro: ResizeObserver | undefined;
 
 onMounted(async () => {
@@ -722,18 +907,7 @@ onMounted(async () => {
       }
       invoke("set_all_web_tabs_opacity", { opacity: effectiveOpacity.value }).catch(() => {});
       document.body.style.setProperty("--shell-alpha", String(effectiveOpacity.value));
-      // Rust 恢复时对 WEB_TABS 全部 show(),会露出非活跃的 inline tab;
-      // 由前端接管:让当前 active(如果是 inline)显示,其余 inline 再隐藏;popout/pip 保持
-      const cur = tabs.active;
-      if (cur && cur.mode === "inline") {
-        activateVisual(cur.id);
-      } else {
-        for (const other of tabs.tabs) {
-          if (other.mode === "inline") {
-            invoke("set_web_tab_visible", { id: other.id, visible: false }).catch(() => {});
-          }
-        }
-      }
+      restoreTabsVisual();
     }
   });
   // 独立菜单窗口选中项后广播
@@ -810,6 +984,22 @@ onMounted(async () => {
   unlistenWorkAppGone = await win.listen("work-app-gone", () => {
     workAppPresent.value = false;
   });
+  // M8: 桌宠双击退出 → Rust 已恢复主窗,前端重整 tab 显隐与透明度
+  unlistenPetExited = await win.listen("pet-exited", async () => {
+    pet.setActive(false);
+    isHidden.value = false;
+    invoke("set_all_web_tabs_opacity", { opacity: effectiveOpacity.value }).catch(() => {});
+    document.body.style.setProperty("--shell-alpha", String(effectiveOpacity.value));
+    await restoreTabsVisual();
+  });
+  // M8: 桌宠窗口内改了尺寸/置顶(滚轮、右键菜单)→ 回写 store 持久化,
+  //     并重新下发配置,下次开桌宠沿用。窗口本身已自行改好,这里不再调命令。
+  unlistenPetSize = await win.listen<number>("pet-size-changed", (evt) => {
+    pet.setSize(evt.payload);
+  });
+  unlistenPetTop = await win.listen<boolean>("pet-top-changed", (evt) => {
+    pet.setAlwaysOnTop(evt.payload);
+  });
   // 冷启动:把已保存的 M5 配置下发给 Rust 轮询线程
   pushWorkMonitorConfig();
   // 冷启动:如已保存"取消透明"快捷键,注册回 Rust
@@ -850,6 +1040,9 @@ onBeforeUnmount(() => {
   unlistenPinSignal?.();
   unlistenWorkApp?.();
   unlistenWorkAppGone?.();
+  unlistenPetExited?.();
+  unlistenPetSize?.();
+  unlistenPetTop?.();
   ro?.disconnect();
 });
 </script>
@@ -924,6 +1117,7 @@ onBeforeUnmount(() => {
       :work-monitor-action="workMonitorAction"
       :work-monitor-keywords="workMonitorKeywords"
       :work-app-present="workAppPresent"
+      :boss-action="bossAction"
       @update:auto-hide="autoHide = $event"
       @update:auto-hide-delay="autoHideDelay = $event"
       @update:video-auto-landscape="videoAutoLandscape = $event"
@@ -932,7 +1126,9 @@ onBeforeUnmount(() => {
       @update:work-monitor="workMonitor = $event"
       @update:work-monitor-action="workMonitorAction = $event"
       @update:work-monitor-keywords="workMonitorKeywords = $event"
+      @update:boss-action="bossAction = $event"
       @preview-disguise="enterDisguise"
+      @preview-pet="enterPetMode"
       @close="showSettings = false"
     />
 
@@ -1031,8 +1227,8 @@ onBeforeUnmount(() => {
 
     <!-- 右键菜单已改为独立 Tauri 窗口(能盖住 web-tab),不在 DOM 里渲染 -->
 
-    <!-- M4 伪装皮肤覆盖层:盖住整个摸鱼界面 -->
-    <DisguiseOverlay v-if="disguise.active" @exit="exitDisguise" />
+    <!-- M4 伪装皮肤覆盖层:仅遮蔽式模式渲染(阅读式靠注入样式,不盖内容) -->
+    <DisguiseOverlay v-if="disguise.active && disguise.mode === 'cover'" @exit="exitDisguise" />
   </div>
 </template>
 

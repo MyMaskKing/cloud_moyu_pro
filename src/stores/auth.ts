@@ -16,7 +16,7 @@ export const useAuthStore = defineStore("auth", () => {
   const status = ref<AuthStatus>({
     loggedIn: false,
     isVip: false,
-    entitlements: { disguise: false, workMonitor: false },
+    entitlements: { disguise: false, workMonitor: false, pet: false },
   });
   const ready = ref(false);
   const loading = ref(false);

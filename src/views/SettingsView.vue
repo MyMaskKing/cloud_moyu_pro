@@ -25,12 +25,17 @@ function pickMode(m: DisguiseMode) {
   disguise.setMode(m);
 }
 
+import lopcatImg from "../images/奶白垂耳猫.png";
+import psyduckImg from "../images/黄色可达鸭.png";
+import hamsterImg from "../images/雾灰蓝仓鼠.png";
+import corgiImg from "../images/焦糖柯基.png";
+
 // ────── M8 桌面宠物 ──────
-const PETS: { key: PetKind; name: string; desc: string; emoji: string }[] = [
-  { key: "cat",   name: "白猫",   desc: "粗描边简笔,敲键盘主力", emoji: "🐱" },
-  { key: "capy",  name: "水豚",   desc: "顶着橘子,一脸躺平",     emoji: "🧡" },
-  { key: "shiba", name: "柴犬",   desc: "白脸 mask,吐舌头",      emoji: "🐕" },
-  { key: "duck",  name: "小黄鸭", desc: "摇摆走路,大扁嘴",       emoji: "🦆" },
+const PETS: { key: PetKind; name: string; desc: string; emoji: string; img: string }[] = [
+  { key: "lopcat",   name: "奶白垂耳猫", desc: "温柔大眼,长耳轻晃,鼠标靠近会歪头", emoji: "🐱", img: lopcatImg },
+  { key: "psyduck",  name: "黄色可达鸭", desc: "放空晃头,压力波纹,小短脚扑腾",     emoji: "🦆", img: psyduckImg },
+  { key: "hamster",  name: "雾灰蓝仓鼠", desc: "活泼蹦跳,快速眨眼,鼓腮帮捂脸",     emoji: "🐹", img: hamsterImg },
+  { key: "corgi",    name: "焦糖柯基",   desc: "慵懒半垂眼,慢半拍歪头打瞌睡",     emoji: "🐶", img: corgiImg },
 ];
 /** 打字反应依赖 Windows API,其它平台需系统辅助功能权限,暂不支持 */
 const typingSupported = navigator.userAgent.includes("Windows");
@@ -543,8 +548,11 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
                 :class="{ act: pet.kind === p.key }"
                 @click="pet.setKind(p.key)"
               >
-                <div class="skin-name">{{ p.emoji }} {{ p.name }}</div>
-                <div class="skin-desc">{{ p.desc }}</div>
+                <img :src="p.img" :alt="p.name" class="skin-img-preview" />
+                <div class="skin-info">
+                  <div class="skin-name">{{ p.emoji }} {{ p.name }}</div>
+                  <div class="skin-desc">{{ p.desc }}</div>
+                </div>
               </div>
             </div>
 
@@ -933,13 +941,27 @@ code {
 .skin-list { display: flex; gap: 8px; flex-wrap: wrap; }
 .skin-card {
   flex: 1;
-  min-width: 130px;
+  min-width: 150px;
   padding: 10px 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.03);
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   transition: border-color 0.15s, background 0.15s;
+}
+.skin-img-preview {
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+}
+.skin-info {
+  flex: 1;
+  min-width: 0;
 }
 .skin-card:hover { background: rgba(255, 255, 255, 0.07); }
 .skin-card.act {

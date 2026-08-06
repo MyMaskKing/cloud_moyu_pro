@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 
-export type PetKind = "cat" | "capy" | "shiba" | "duck";
+export type PetKind = "lopcat" | "psyduck" | "hamster" | "corgi";
 
 /** 桌宠本体边长范围(逻辑像素),滚轮/滑块都在这个区间内取值 */
 export const PET_MIN = 80;
@@ -11,8 +11,12 @@ export const PET_DEFAULT = 140;
  * 窗口顶部为气泡预留的高度。
  * 气泡必须画在本体上方的留白里 —— 桌宠窗口只有本体那么大时,
  * 气泡会被窗口边界裁掉,而不是"浮"在桌面上。
+ * 68px ≈ 四行 11px 文字 + 内边距,长台词也不会被裁。
+ *
+ * 刻意不为气泡加宽窗口:桌宠窗透明区同样会挡住桌面点击,
+ * 加宽等于凭空多出一块看不见的死区,代价比气泡窄更难受。
  */
-export const PET_BUBBLE_H = 56;
+export const PET_BUBBLE_H = 68;
 
 export function clampPetSize(n: number): number {
   if (!Number.isFinite(n)) return PET_DEFAULT;
@@ -50,7 +54,7 @@ interface PetPersisted {
 }
 
 const defaults: PetPersisted = {
-  kind: "cat",
+  kind: "lopcat",
   size: PET_DEFAULT,
   followMouse: true,
   wander: true,
@@ -59,10 +63,14 @@ const defaults: PetPersisted = {
   lines: [...DEFAULT_PET_LINES],
 };
 
-/** 旧版本 size 是 "s"|"m"|"l" 三档,kind 里还有已下线的 slime/fish */
+/** 旧版本 size 是 "s"|"m"|"l" 三档,迁移到像素值 */
 const LEGACY_SIZE: Record<string, number> = { s: 96, m: 140, l: 190 };
-const LEGACY_KIND: Record<string, PetKind> = { slime: "capy", fish: "shiba" };
-const KINDS: PetKind[] = ["cat", "capy", "shiba", "duck"];
+/** 旧版本 kind 迁移到新角色:按气质就近映射,不让老用户的设置变成空值 */
+const LEGACY_KIND: Record<string, PetKind> = {
+  cat: "lopcat", capy: "corgi", shiba: "corgi", duck: "psyduck",
+  slime: "hamster", fish: "hamster",
+};
+const KINDS: PetKind[] = ["lopcat", "psyduck", "hamster", "corgi"];
 
 function loadPersisted(): PetPersisted {
   try {

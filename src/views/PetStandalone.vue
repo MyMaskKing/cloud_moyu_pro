@@ -1,9 +1,37 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from "vue";
+import { ref, watch, onMounted, onBeforeUnmount, computed } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit as emitGlobal, type UnlistenFn } from "@tauri-apps/api/event";
 import { PET_BUBBLE_H, clampPetSize } from "../stores/pet";
+
+import lopcatMain from "../images/奶白垂耳猫.png";
+import lopcat01 from "../images/奶白垂耳猫01.png";
+import lopcat02 from "../images/奶白垂耳猫02.png";
+import lopcat03 from "../images/奶白垂耳猫03.png";
+import lopcat04 from "../images/奶白垂耳猫04.png";
+import lopcat05 from "../images/奶白垂耳猫05.png";
+
+import psyduckMain from "../images/黄色可达鸭.png";
+import psyduck01 from "../images/黄色可达鸭01.png";
+import psyduck02 from "../images/黄色可达鸭02.png";
+import psyduck03 from "../images/黄色可达鸭03.png";
+import psyduck04 from "../images/黄色可达鸭04.png";
+import psyduck05 from "../images/黄色可达鸭05.png";
+
+import hamsterMain from "../images/雾灰蓝仓鼠.png";
+import hamster01 from "../images/雾灰蓝仓鼠01.png";
+import hamster02 from "../images/雾灰蓝仓鼠02.png";
+import hamster03 from "../images/雾灰蓝仓鼠03.png";
+import hamster04 from "../images/雾灰蓝仓鼠04.png";
+import hamster05 from "../images/雾灰蓝仓鼠05.png";
+
+import corgiMain from "../images/焦糖柯基.png";
+import corgi01 from "../images/焦糖柯基01.png";
+import corgi02 from "../images/焦糖柯基02.png";
+import corgi03 from "../images/焦糖柯基03.png";
+import corgi04 from "../images/焦糖柯基04.png";
+import corgi05 from "../images/焦糖柯基05.png";
 
 /**
  * M8 桌面宠物(独立窗口 ?view=pet)。
@@ -23,7 +51,7 @@ import { PET_BUBBLE_H, clampPetSize } from "../stores/pet";
  *   - 打字反应 → 主进程 pet-typing 驱动(仅 Windows,只知道"有没有在打字")
  */
 
-type PetKind = "cat" | "capy" | "shiba" | "duck";
+type PetKind = "lopcat" | "psyduck" | "hamster" | "corgi";
 /** 持续态 */
 type Mood = "idle" | "sleep" | "typing";
 /** 瞬时动作:点击时按序轮换 */
@@ -33,7 +61,11 @@ type Facing = "left" | "right";
 const win = getCurrentWindow();
 const params = new URLSearchParams(window.location.search);
 
-const kind = (params.get("kind") || "cat") as PetKind;
+const KIND_LIST: PetKind[] = ["lopcat", "psyduck", "hamster", "corgi"];
+const rawKind = (params.get("kind") || "lopcat") as PetKind;
+// 归一化:旧版本 kind(cat/capy/shiba/duck...)经 HMR 残留在窗口里时,
+// 新模板的 v-if 链不认识它们会渲染空白 → 一律回退默认角色,保证不透明。
+const kind: PetKind = KIND_LIST.includes(rawKind) ? rawKind : "lopcat";
 const followMouse = params.get("follow") === "1";
 const wander = params.get("wander") === "1";
 /** 本体边长;滚轮/右键菜单会改它,窗口尺寸同步跟着变 */
@@ -56,19 +88,79 @@ const action = ref<PetAction>("");
 const facing = ref<Facing>("right");
 const bubble = ref("");
 const isDragging = ref(false);
-/** 视线偏移,-1..1 */
-const eyeX = ref(0);
-const eyeY = ref(0);
+/** 鼠标靠近时为 true:垂耳猫会歪头,其它角色用来放大眨眼等反应 */
+const near = ref(false);
+
 
 /** 点击动作轮换顺序 —— 每次点击取下一个,而不是随机,让人感觉"逗它有反应" */
 const CLICK_ACTIONS: Exclude<PetAction, "">[] = ["jump", "squash", "shake"];
 const ACTION_MS: Record<Exclude<PetAction, "">, number> = { jump: 620, squash: 520, shake: 520 };
 let clickIdx = 0;
 
+const PET_IMAGES: Record<PetKind, { main: string; exprs: string[] }> = {
+  lopcat: {
+    main: lopcatMain,
+    exprs: [lopcat01, lopcat02, lopcat03, lopcat04, lopcat05],
+  },
+  psyduck: {
+    main: psyduckMain,
+    exprs: [psyduck01, psyduck02, psyduck03, psyduck04, psyduck05],
+  },
+  hamster: {
+    main: hamsterMain,
+    exprs: [hamster01, hamster02, hamster03, hamster04, hamster05],
+  },
+  corgi: {
+    main: corgiMain,
+    exprs: [corgi01, corgi02, corgi03, corgi04, corgi05],
+  },
+};
+
+const activeExprIdx = ref<number>(-1);
+const randomIdleExprIdx = ref<number>(-1);
+let idleExprTimer: number | undefined;
+
+// ── 图片双层渐变切换系统 ──
+function getTargetSrc(): string {
+  const data = PET_IMAGES[kind] || PET_IMAGES.lopcat;
+  if (mood.value === "sleep") return data.exprs[4] || data.main;
+  if (mood.value === "typing") return data.exprs[1] || data.main;
+  if (isDragging.value) return data.exprs[2] || data.main;
+  if (action.value === "jump") return data.exprs[0] || data.main;
+  if (action.value === "squash") return data.exprs[2] || data.main;
+  if (action.value === "shake") return data.exprs[3] || data.main;
+  if (activeExprIdx.value >= 0 && data.exprs[activeExprIdx.value]) return data.exprs[activeExprIdx.value];
+  if (near.value && data.exprs[0]) return data.exprs[0];
+  if (randomIdleExprIdx.value >= 0 && data.exprs[randomIdleExprIdx.value]) return data.exprs[randomIdleExprIdx.value];
+  return data.main;
+}
+
+const _initSrc = getTargetSrc();
+const imgSrcA = ref(_initSrc);
+const imgSrcB = ref(_initSrc);
+const topLayer = ref<0 | 1>(0);
+
+function switchTo(newSrc: string) {
+  const curSrc = topLayer.value === 0 ? imgSrcA.value : imgSrcB.value;
+  if (curSrc === newSrc) return;
+  if (topLayer.value === 0) {
+    imgSrcB.value = newSrc;
+    window.requestAnimationFrame(() => { topLayer.value = 1; });
+  } else {
+    imgSrcA.value = newSrc;
+    window.requestAnimationFrame(() => { topLayer.value = 0; });
+  }
+}
+
+watch([mood, action, isDragging, activeExprIdx, randomIdleExprIdx, near], () => {
+  switchTo(getTargetSrc());
+});
+
 let bubbleTimer: number | undefined;
 let actionTimer: number | undefined;
 let wanderTimer: number | undefined;
 let idleTimer: number | undefined;
+let imgSwitchTimer: number | undefined;
 /** 拖动判定:按下位置,位移超过阈值才算拖动而非点击 */
 let downAt: { x: number; y: number } | null = null;
 const DRAG_THRESHOLD = 4;
@@ -86,14 +178,15 @@ const stageStyle = computed(() => ({
   height: bodySize.value + "px",
 }));
 
-/** 眼球位移像素(SVG 100 视口内,最多偏 3.2) */
-const eyeShift = computed(
-  () => `translate(${(eyeX.value * 3.2).toFixed(2)} ${(eyeY.value * 3.2).toFixed(2)})`,
-);
+
+
+/** 气泡单条上限:留白区约能排四行,超长的自定义台词截断而非硬裁一半 */
+const BUBBLE_MAX_CHARS = 26;
 
 function say(text: string, ms = 2600) {
   if (!text) return;
-  bubble.value = text;
+  const t = text.length > BUBBLE_MAX_CHARS ? text.slice(0, BUBBLE_MAX_CHARS - 1) + "…" : text;
+  bubble.value = t;
   if (bubbleTimer) window.clearTimeout(bubbleTimer);
   bubbleTimer = window.setTimeout(() => { bubble.value = ""; }, ms);
 }
@@ -101,11 +194,18 @@ function say(text: string, ms = 2600) {
 /** 播放一段瞬时动作;结束后自动清空,不影响 idle/typing/sleep 持续态 */
 function playAction(a: Exclude<PetAction, "">) {
   if (actionTimer) window.clearTimeout(actionTimer);
+  if (imgSwitchTimer) window.clearTimeout(imgSwitchTimer);
   // 同一个动作连点时先清空一帧,否则 CSS 动画不会重新触发
   action.value = "";
   window.requestAnimationFrame(() => {
     action.value = a;
-    actionTimer = window.setTimeout(() => { action.value = ""; }, ACTION_MS[a]);
+    actionTimer = window.setTimeout(() => {
+      action.value = "";
+      // 动作结束后稍作延迟再回到主图,避免表情闪烁
+      imgSwitchTimer = window.setTimeout(() => {
+        activeExprIdx.value = -1;
+      }, 280);
+    }, ACTION_MS[a]);
   });
 }
 
@@ -152,6 +252,7 @@ function onClick() {
   if (isDragging.value) return;
   resetIdle();
   playAction(CLICK_ACTIONS[clickIdx % CLICK_ACTIONS.length]);
+  activeExprIdx.value = clickIdx % 5;
   clickIdx++;
   if (lines.length) {
     say(lines[Math.floor(Math.random() * lines.length)]);
@@ -245,32 +346,42 @@ function tickWander() {
 }
 
 /**
- * 由 pet-cursor 驱动:只做视线跟随,绝不移动窗口。
- * 位置完全由用户拖拽决定 —— 宠物自己乱跑会挡住桌面操作,也让人找不到它。
+ * 由 pet-cursor 驱动:更新朝向与鼠标靠近状态,切换对应表情。
+ * 位置完全由用户拖拽决定 —— 宠物自己乱跑会挡住桌面操作。
  */
 async function applyEyeTrack(cx: number, cy: number) {
   if (!followMouse) return;
   try {
     const scale = window.devicePixelRatio || 1;
     const pos = await win.innerPosition();
-    // 本体在窗口下半部分,视线中心要按本体算而不是按整窗算
     const centerX = pos.x / scale + bodySize.value / 2;
     const centerY = pos.y / scale + PET_BUBBLE_H + bodySize.value / 2;
     const dx = cx / scale - centerX;
     const dy = cy / scale - centerY;
-    // 归一化到 -1..1(200px 外视为看到底)
-    eyeX.value = Math.max(-1, Math.min(1, dx / 200));
-    eyeY.value = Math.max(-1, Math.min(1, dy / 200));
     if (dx > 12) facing.value = "right";
     else if (dx < -12) facing.value = "left";
+    const dist = Math.hypot(dx, dy);
+    near.value = dist < bodySize.value * 0.6;
   } catch {
     /* ignore */
   }
 }
 
+function startIdleExprLoop() {
+  idleExprTimer = window.setInterval(() => {
+    if (mood.value === "idle" && !near.value && !action.value && !isDragging.value) {
+      randomIdleExprIdx.value = Math.floor(Math.random() * 4);
+      setTimeout(() => {
+        randomIdleExprIdx.value = -1;
+      }, 2200);
+    }
+  }, 8500);
+}
+
 onMounted(async () => {
   resetIdle();
   wanderTimer = window.setInterval(tickWander, 6000);
+  startIdleExprLoop();
 
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", endDrag);
@@ -321,6 +432,8 @@ onBeforeUnmount(() => {
   if (actionTimer) window.clearTimeout(actionTimer);
   if (idleTimer) window.clearTimeout(idleTimer);
   if (wanderTimer) window.clearInterval(wanderTimer);
+  if (imgSwitchTimer) window.clearTimeout(imgSwitchTimer);
+  if (idleExprTimer) window.clearInterval(idleExprTimer);
   unlistens.forEach((u) => u());
 });
 </script>
@@ -329,7 +442,8 @@ onBeforeUnmount(() => {
   <div
     class="pet-root"
     :style="rootStyle"
-    :class="[`m-${mood}`, `f-${facing}`, action && `a-${action}`, { 'is-drag': isDragging }]"
+    :class="[`m-${mood}`, `f-${facing}`, `k-${kind}`,
+      action && `a-${action}`, { 'is-drag': isDragging, 'is-near': near }]"
     @pointerdown="onPointerDown"
     @click="onClick"
     @dblclick="onDblClick"
@@ -340,176 +454,20 @@ onBeforeUnmount(() => {
 
     <div class="pet-stage" :style="stageStyle">
       <div class="pet-body">
-        <!-- ══════ 白猫(BongoCat 风:粗描边 + 扁平填色) ══════ -->
-        <svg v-if="kind === 'cat'" viewBox="0 0 100 100" class="pet-svg">
-          <ellipse class="pet-shadow" cx="50" cy="96" rx="27" ry="3.4" />
-          <g stroke="#33302e" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round">
-            <!-- 尾巴 -->
-            <path class="cat-tail" d="M74 84 q20 -2 15 -20" fill="none" />
-            <!-- 身体 -->
-            <path d="M28 92 q-3 -26 22 -26 q25 0 22 26 Z" fill="#fdfcfa" />
-            <!-- 前爪 -->
-            <ellipse cx="40" cy="90" rx="7" ry="4.6" fill="#fdfcfa" />
-            <ellipse cx="60" cy="90" rx="7" ry="4.6" fill="#fdfcfa" />
-            <!-- 耳朵 -->
-            <path d="M26 38 q-2 -19 9 -20 q3 8 9 13 Z" fill="#fdfcfa" />
-            <path d="M74 38 q2 -19 -9 -20 q-3 8 -9 13 Z" fill="#fdfcfa" />
-            <path d="M30 34 q-1 -11 5 -12 q1 5 4 8 Z" fill="#ffb9c4" stroke="none" />
-            <path d="M70 34 q1 -11 -5 -12 q-1 5 -4 8 Z" fill="#ffb9c4" stroke="none" />
-            <!-- 头 -->
-            <circle cx="50" cy="44" r="27" fill="#fdfcfa" />
-          </g>
-          <g :transform="eyeShift">
-            <g class="eyes-open">
-              <ellipse cx="39" cy="43" rx="4.4" ry="6" fill="#33302e" />
-              <ellipse cx="61" cy="43" rx="4.4" ry="6" fill="#33302e" />
-              <circle cx="40.6" cy="40.6" r="1.7" fill="#fff" />
-              <circle cx="62.6" cy="40.6" r="1.7" fill="#fff" />
-            </g>
-            <g class="eyes-closed">
-              <path d="M34 43 q5 4.5 10 0" fill="none" stroke="#33302e" stroke-width="2.4" stroke-linecap="round" />
-              <path d="M56 43 q5 4.5 10 0" fill="none" stroke="#33302e" stroke-width="2.4" stroke-linecap="round" />
-            </g>
-            <g class="eyes-happy">
-              <path d="M34 45 q5 -6 10 0" fill="none" stroke="#33302e" stroke-width="2.4" stroke-linecap="round" />
-              <path d="M56 45 q5 -6 10 0" fill="none" stroke="#33302e" stroke-width="2.4" stroke-linecap="round" />
-            </g>
-          </g>
-          <!-- 鼻 + ω 嘴 -->
-          <path d="M47.6 52 h4.8 l-2.4 2.4 Z" fill="#ff9aa8" />
-          <path d="M50 55 q-3 3.4 -5.6 0.4 M50 55 q3 3.4 5.6 0.4" fill="none" stroke="#33302e" stroke-width="1.7" stroke-linecap="round" />
-          <!-- 胡须 -->
-          <g stroke="#c9c3bd" stroke-width="1.4" stroke-linecap="round">
-            <path d="M27 51 L13 48" /><path d="M27 55 L13 57" />
-            <path d="M73 51 L87 48" /><path d="M73 55 L87 57" />
-          </g>
-          <text class="zzz" x="80" y="20" font-size="13" fill="#8fa8c0">z</text>
-        </svg>
+        <!-- 地面阴影 -->
+        <div class="pet-shadow-el"></div>
 
-        <!-- ══════ 水豚(方头 + 一脸淡定 + 头顶橘子) ══════ -->
-        <svg v-else-if="kind === 'capy'" viewBox="0 0 100 100" class="pet-svg">
-          <ellipse class="pet-shadow" cx="50" cy="96" rx="28" ry="3.4" />
-          <g stroke="#5a4032" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round">
-            <!-- 身体(躺平感:宽而扁) -->
-            <path d="M24 92 q-2 -22 26 -22 q28 0 26 22 Z" fill="#a87c58" />
-            <ellipse cx="39" cy="90" rx="7" ry="4.4" fill="#966d4c" />
-            <ellipse cx="61" cy="90" rx="7" ry="4.4" fill="#966d4c" />
-            <!-- 耳朵(小圆) -->
-            <ellipse cx="27" cy="34" rx="6.4" ry="5.4" fill="#966d4c" />
-            <ellipse cx="73" cy="34" rx="6.4" ry="5.4" fill="#966d4c" />
-            <!-- 头(圆角方,水豚的招牌轮廓) -->
-            <rect x="23" y="24" width="54" height="44" rx="17" fill="#b98a63" />
-            <!-- 口鼻区 -->
-            <ellipse cx="50" cy="58" rx="15" ry="9" fill="#a67c56" />
-          </g>
-          <!-- 头顶橘子(温泉水豚梗) -->
-          <g class="capy-orange">
-            <circle cx="50" cy="18" r="7.4" fill="#ff9d33" stroke="#d97a17" stroke-width="1.8" />
-            <path d="M50 11.5 q4 -3.4 6 -1" fill="none" stroke="#4c8c3a" stroke-width="2" stroke-linecap="round" />
-          </g>
-          <g :transform="eyeShift">
-            <g class="eyes-open">
-              <ellipse cx="38" cy="44" rx="3.4" ry="3.9" fill="#3a2a1e" />
-              <ellipse cx="62" cy="44" rx="3.4" ry="3.9" fill="#3a2a1e" />
-              <circle cx="39.2" cy="42.6" r="1.3" fill="#fff" />
-              <circle cx="63.2" cy="42.6" r="1.3" fill="#fff" />
-            </g>
-            <g class="eyes-closed">
-              <path d="M34 44 q4 3.6 8 0" fill="none" stroke="#3a2a1e" stroke-width="2.2" stroke-linecap="round" />
-              <path d="M58 44 q4 3.6 8 0" fill="none" stroke="#3a2a1e" stroke-width="2.2" stroke-linecap="round" />
-            </g>
-            <g class="eyes-happy">
-              <path d="M34 46 q4 -5 8 0" fill="none" stroke="#3a2a1e" stroke-width="2.2" stroke-linecap="round" />
-              <path d="M58 46 q4 -5 8 0" fill="none" stroke="#3a2a1e" stroke-width="2.2" stroke-linecap="round" />
-            </g>
-          </g>
-          <!-- 鼻孔 + 平嘴(水豚的"无所谓"表情全靠这条直线) -->
-          <ellipse cx="45.6" cy="54" rx="1.5" ry="1.1" fill="#5a4032" />
-          <ellipse cx="54.4" cy="54" rx="1.5" ry="1.1" fill="#5a4032" />
-          <path d="M43 61 h14" fill="none" stroke="#5a4032" stroke-width="1.9" stroke-linecap="round" />
-          <text class="zzz" x="82" y="20" font-size="13" fill="#8fa8c0">z</text>
-        </svg>
+        <!-- 双层图片渐变切换:避免表情切换时闪烁 -->
+        <div class="pet-img-wrap">
+          <img :src="imgSrcA" :alt="kind" class="pet-img" :class="{ 'img-top': topLayer === 0 }" />
+          <img :src="imgSrcB" :alt="kind" class="pet-img" :class="{ 'img-top': topLayer === 1 }" />
+        </div>
 
-        <!-- ══════ 柴犬(白脸 mask + 尖耳 + doge 笑) ══════ -->
-        <svg v-else-if="kind === 'shiba'" viewBox="0 0 100 100" class="pet-svg">
-          <ellipse class="pet-shadow" cx="50" cy="96" rx="26" ry="3.4" />
-          <g stroke="#4a3524" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round">
-            <!-- 尾巴(柴犬卷尾) -->
-            <path class="shiba-tail" d="M74 84 q18 -6 10 -18 q-6 -6 -11 2" fill="#e8a44c" />
-            <!-- 身体 -->
-            <path d="M28 92 q-2 -25 22 -25 q24 0 22 25 Z" fill="#e8a44c" />
-            <path d="M38 92 q2 -18 12 -18 q10 0 12 18 Z" fill="#fdf3e3" stroke="none" />
-            <ellipse cx="40" cy="90" rx="6.8" ry="4.4" fill="#fdf3e3" />
-            <ellipse cx="60" cy="90" rx="6.8" ry="4.4" fill="#fdf3e3" />
-            <!-- 尖耳 -->
-            <path d="M27 36 q-3 -20 8 -20 q3 9 9 14 Z" fill="#e8a44c" />
-            <path d="M73 36 q3 -20 -8 -20 q-3 9 -9 14 Z" fill="#e8a44c" />
-            <path d="M31 33 q-1 -12 5 -12 q1 6 4 9 Z" fill="#c98c3c" stroke="none" />
-            <path d="M69 33 q1 -12 -5 -12 q-1 6 -4 9 Z" fill="#c98c3c" stroke="none" />
-            <!-- 头 -->
-            <circle cx="50" cy="44" r="27" fill="#e8a44c" />
-            <!-- 白脸 mask:柴犬的辨识度全在这块 -->
-            <path d="M50 22 q-16 4 -16 22 q0 18 16 24 q16 -6 16 -24 q0 -18 -16 -22 Z" fill="#fdf3e3" />
-          </g>
-          <g :transform="eyeShift">
-            <g class="eyes-open">
-              <ellipse cx="38.5" cy="42" rx="4" ry="5" fill="#3d2b1c" />
-              <ellipse cx="61.5" cy="42" rx="4" ry="5" fill="#3d2b1c" />
-              <circle cx="39.9" cy="40" r="1.5" fill="#fff" />
-              <circle cx="62.9" cy="40" r="1.5" fill="#fff" />
-            </g>
-            <g class="eyes-closed">
-              <path d="M34 42 q4.5 4 9 0" fill="none" stroke="#3d2b1c" stroke-width="2.3" stroke-linecap="round" />
-              <path d="M57 42 q4.5 4 9 0" fill="none" stroke="#3d2b1c" stroke-width="2.3" stroke-linecap="round" />
-            </g>
-            <g class="eyes-happy">
-              <path d="M34 44 q4.5 -5.5 9 0" fill="none" stroke="#3d2b1c" stroke-width="2.3" stroke-linecap="round" />
-              <path d="M57 44 q4.5 -5.5 9 0" fill="none" stroke="#3d2b1c" stroke-width="2.3" stroke-linecap="round" />
-            </g>
-          </g>
-          <!-- 黑鼻 + doge 的 W 形笑嘴 -->
-          <path d="M46.4 52 q3.6 -2.6 7.2 0 q-1.6 3.4 -3.6 3.4 q-2 0 -3.6 -3.4 Z" fill="#3d2b1c" />
-          <path d="M50 56.4 q-4 4.4 -7 1 M50 56.4 q4 4.4 7 1" fill="none" stroke="#3d2b1c" stroke-width="1.8" stroke-linecap="round" />
-          <!-- 吐出的小舌头 -->
-          <path class="shiba-tongue" d="M46.6 59.6 q3.4 5 6.8 0 Z" fill="#ff8095" stroke="#e0637c" stroke-width="1.2" />
-          <text class="zzz" x="80" y="20" font-size="13" fill="#8fa8c0">z</text>
-        </svg>
-
-        <!-- ══════ 小黄鸭 ══════ -->
-        <svg v-else viewBox="0 0 100 100" class="pet-svg">
-          <ellipse class="pet-shadow" cx="50" cy="96" rx="24" ry="3.4" />
-          <g class="duck-sway" stroke="#8a6410" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round">
-            <!-- 身体 -->
-            <path d="M26 90 q-2 -24 24 -24 q26 0 24 24 Z" fill="#ffd94a" />
-            <!-- 翅膀 -->
-            <path class="duck-wing" d="M30 72 q-8 6 -1 12 q8 2 10 -6 Z" fill="#f5c92e" />
-            <!-- 头 -->
-            <circle cx="50" cy="42" r="24" fill="#ffe066" />
-            <!-- 喙 -->
-            <path d="M40 50 q10 -3 20 0 q-3 8 -10 8 q-7 0 -10 -8 Z" fill="#ff9f2e" />
-            <!-- 脚 -->
-            <path d="M42 90 q-6 4 -8 6 h16 Z" fill="#ff9f2e" />
-            <path d="M58 90 q6 4 8 6 h-16 Z" fill="#ff9f2e" />
-          </g>
-          <path d="M41 53.6 q9 2 18 0" fill="none" stroke="#d9821a" stroke-width="1.4" />
-          <g :transform="eyeShift">
-            <g class="eyes-open">
-              <ellipse cx="40" cy="39" rx="4.2" ry="5.4" fill="#3a3020" />
-              <ellipse cx="60" cy="39" rx="4.2" ry="5.4" fill="#3a3020" />
-              <circle cx="41.5" cy="37" r="1.6" fill="#fff" />
-              <circle cx="61.5" cy="37" r="1.6" fill="#fff" />
-            </g>
-            <g class="eyes-closed">
-              <path d="M35.5 39 q4.5 4 9 0" fill="none" stroke="#3a3020" stroke-width="2.3" stroke-linecap="round" />
-              <path d="M55.5 39 q4.5 4 9 0" fill="none" stroke="#3a3020" stroke-width="2.3" stroke-linecap="round" />
-            </g>
-            <g class="eyes-happy">
-              <path d="M35.5 41 q4.5 -5.5 9 0" fill="none" stroke="#3a3020" stroke-width="2.3" stroke-linecap="round" />
-              <path d="M55.5 41 q4.5 -5.5 9 0" fill="none" stroke="#3a3020" stroke-width="2.3" stroke-linecap="round" />
-            </g>
-          </g>
-          <text class="zzz" x="82" y="20" font-size="13" fill="#8fa8c0">z</text>
-        </svg>
+        <!-- 睡觉 zzz 标记 -->
+        <div v-if="mood === 'sleep'" class="zzz-box">
+          <span class="zzz">z</span>
+          <span class="zzz z2">z</span>
+        </div>
 
         <!-- ══════ 打字特效:键盘 + 交替拍打的爪子(所有宠物共用) ══════ -->
         <svg viewBox="0 0 100 100" class="pet-typing-fx">
@@ -527,9 +485,9 @@ onBeforeUnmount(() => {
             <circle class="fx-spark s1" cx="36" cy="88" r="2.6" fill="#ffe27a" />
             <circle class="fx-spark s2" cx="64" cy="88" r="2.6" fill="#7fe0ff" />
           </g>
-          <!-- 两只爪子交替拍(BongoCat 的灵魂就是这个错开半拍) -->
-          <ellipse class="fx-paw paw-l" cx="35" cy="84" rx="7.4" ry="5.2" fill="#fdfcfa" stroke="#33302e" stroke-width="2" />
-          <ellipse class="fx-paw paw-r" cx="65" cy="84" rx="7.4" ry="5.2" fill="#fdfcfa" stroke="#33302e" stroke-width="2" />
+          <!-- 两只爪子交替拍(柔和无粗黑边) -->
+          <ellipse class="fx-paw paw-l" cx="36" cy="86" rx="5.8" ry="3.8" stroke="rgba(0, 0, 0, 0.15)" stroke-width="0.8" />
+          <ellipse class="fx-paw paw-r" cx="64" cy="86" rx="5.8" ry="3.8" stroke="rgba(0, 0, 0, 0.15)" stroke-width="0.8" />
           <!-- 飞出的音符,表示手速飞快 -->
           <text class="fx-note n1" x="16" y="58" font-size="12" fill="#ffcf47">♪</text>
           <text class="fx-note n2" x="80" y="52" font-size="10" fill="#7fd8f0">✦</text>
@@ -553,17 +511,18 @@ html, body, #app {
 </style>
 
 <style scoped>
+/* ── 根容器 ── */
 .pet-root {
   position: relative;
   background: transparent;
   user-select: none;
   cursor: grab;
-  overflow: hidden;
+  overflow: visible;
   -webkit-user-select: none;
 }
 .pet-root:active { cursor: grabbing; }
 
-/* 本体舞台:固定在窗口底部,顶部那段留给气泡 */
+/* ── 本体舞台 ── */
 .pet-stage {
   position: absolute;
   left: 0;
@@ -574,52 +533,94 @@ html, body, #app {
   width: 100%;
   height: 100%;
   transform-origin: 50% 92%;
-  animation: breathe 2.6s ease-in-out infinite;
+  animation: breathe 3s ease-in-out infinite;
+  will-change: transform;
 }
-.pet-svg {
+
+/* ── 图片双层渐变切换系统 ── */
+.pet-img-wrap {
+  position: relative;
   width: 100%;
   height: 100%;
-  /* 让宠物在任意桌面底色上都能看清轮廓 */
-  filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.3));
 }
-/* 地面投影:让宠物看起来"站"在桌面上而不是飘着 */
-.pet-shadow { fill: rgba(0, 0, 0, 0.15); }
-/* 朝向:翻转必须挂在不带动画的元素上 —— .pet-body 上的 breathe/nod 等
-   都在动画 transform,会把 scaleX(-1) 覆盖掉 */
-.f-left .pet-svg { transform: scaleX(-1); }
+.pet-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 0.28s ease-in-out, transform 0.2s ease-out;
+  pointer-events: none;
+  will-change: opacity, transform;
+}
+.pet-img.img-top { opacity: 1; }
 
-@keyframes breathe {
-  0%, 100% { transform: scaleY(1) scaleX(1); }
-  50%      { transform: scaleY(1.035) scaleX(0.985); }
+/* ── 地面阴影(随呼吸同步缩放) ── */
+.pet-shadow-el {
+  position: absolute;
+  bottom: 1px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 62%;
+  height: 10px;
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 50%;
+  filter: blur(5px);
+  pointer-events: none;
+  animation: shadow-pulse 3s ease-in-out infinite;
+}
+@keyframes shadow-pulse {
+  0%, 100% { transform: translateX(-50%) scaleX(1);    opacity: 0.16; }
+  40%      { transform: translateX(-50%) scaleX(0.96); opacity: 0.12; }
 }
 
-/* ── 眼睛三态:睁 / 闭(睡) / 笑(互动中) ── */
-.eyes-closed,
-.eyes-happy { display: none; }
-.m-sleep .eyes-open { display: none; }
-.m-sleep .eyes-closed { display: block; }
-.a-jump .eyes-open,
-.a-squash .eyes-open,
-.a-shake .eyes-open { display: none; }
-.a-jump .eyes-happy,
-.a-squash .eyes-happy,
-.a-shake .eyes-happy { display: block; }
-/* 拖起来时瞪大眼 */
-.is-drag .eyes-open { transform: scale(1.25); transform-origin: 50% 44%; }
+/* ── 朝向翻转 ── */
+.f-left .pet-img { transform: scaleX(-1); }
+/* 打字时强制正面朝向:键盘 SVG 不随翻转 */
+.f-left.m-typing .pet-img { transform: none; }
 
-.zzz { opacity: 0; }
-.m-sleep .zzz {
-  opacity: 1;
-  animation: zfloat 2.2s ease-out infinite;
+/* ── 睡觉 ZZZ ── */
+.zzz-box {
+  position: absolute;
+  top: 6%;
+  right: 8%;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.zzz {
+  font-weight: 900;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  color: #7aaad4;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  font-size: 16px;
+  opacity: 0;
+  animation: zfloat 2.4s ease-out infinite;
+}
+.zzz.z2 {
+  animation-delay: 1s;
+  font-size: 12px;
+  color: #9abfe0;
 }
 @keyframes zfloat {
-  0%   { opacity: 0; transform: translate(0, 0) scale(0.7); }
-  30%  { opacity: 1; }
-  100% { opacity: 0; transform: translate(6px, -14px) scale(1.15); }
+  0%   { opacity: 0;   transform: translate(0, 4px) scale(0.55); }
+  25%  { opacity: 0.9; }
+  80%  { opacity: 0.3; }
+  100% { opacity: 0;   transform: translate(5px, -18px) scale(1.1); }
 }
-.m-sleep .pet-body { animation: breathe 4.4s ease-in-out infinite; }
 
-/* ── 打字中:掏出键盘一起敲 ── */
+/* ── 呼吸待机 ── */
+@keyframes breathe {
+  0%, 100% { transform: scaleY(1)     scaleX(1); }
+  40%      { transform: scaleY(1.03)  scaleX(0.988); }
+  70%      { transform: scaleY(0.997) scaleX(1.002); }
+}
+.m-sleep .pet-body { animation: breathe 5.5s ease-in-out infinite; }
+
+/* ── 打字键盘 + 爪子 + 飞舞音符特效 ── */
 .pet-typing-fx {
   position: absolute;
   inset: 0;
@@ -627,139 +628,137 @@ html, body, #app {
   height: 100%;
   opacity: 0;
   pointer-events: none;
-  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.28));
-  transition: opacity 0.16s ease-out;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+  transition: opacity 0.2s ease-out;
+  z-index: 5;
 }
 .m-typing .pet-typing-fx { opacity: 1; }
-/* 打字时强制朝正前方:宠物翻转而键盘不翻转会左右错位 */
-.f-left.m-typing .pet-svg { transform: none; }
-.m-typing .pet-body { animation: nod 0.4s ease-in-out infinite; }
-@keyframes nod {
-  0%, 100% { transform: translateY(-4px); }
-  50%      { transform: translateY(-7px) scaleY(0.985); }
-}
-.m-typing .fx-kb { animation: kb-in 0.24s ease-out; }
+
+.m-typing .fx-kb { animation: kb-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1); }
 @keyframes kb-in {
-  0%   { transform: translateY(14px); opacity: 0; }
+  0%   { transform: translateY(12px); opacity: 0; }
   100% { transform: translateY(0); opacity: 1; }
 }
-/* 爪子交替拍打 —— 错开半个周期才像在打字 */
-.fx-paw { animation: tap 0.2s ease-in-out infinite; transform-origin: 50% 100%; }
+
+.fx-paw {
+  animation: tap 0.2s ease-in-out infinite alternate;
+  transform-origin: 50% 100%;
+  fill: var(--paw, #fdfcfa);
+}
 .fx-paw.paw-r { animation-delay: 0.1s; }
 @keyframes tap {
-  0%, 100% { transform: translateY(-5px) rotate(-4deg); }
-  50%      { transform: translateY(0) rotate(0deg); }
+  0%   { transform: translateY(-5px) rotate(-6deg); }
+  100% { transform: translateY(0) rotate(2deg); }
 }
+
 .fx-spark { opacity: 0; animation: spark 0.4s ease-out infinite; }
 .fx-spark.s2 { animation-delay: 0.2s; }
 @keyframes spark {
-  0%   { opacity: 0.9; transform: scale(0.3); }
+  0%   { opacity: 0.9; transform: scale(0.4); }
   100% { opacity: 0; transform: scale(1.5); }
 }
+
 .fx-note { opacity: 0; animation: note-fly 1.5s ease-out infinite; }
 .fx-note.n2 { animation-delay: 0.5s; }
-.fx-note.n3 { animation-delay: 1s; }
+.fx-note.n3 { animation-delay: 1.0s; }
 @keyframes note-fly {
   0%   { opacity: 0; transform: translate(0, 4px) scale(0.6) rotate(0deg); }
   30%  { opacity: 1; }
-  100% { opacity: 0; transform: translate(-4px, -18px) scale(1.1) rotate(-14deg); }
+  100% { opacity: 0; transform: translate(-6px, -20px) scale(1.15) rotate(-16deg); }
 }
 
-/* ── 点击互动:三种动作轮流播放。写在持续态之后,优先级更高 ── */
+/* 各角色打字爪子颜色 */
+.k-lopcat  { --paw: #ffffff; }
+.k-psyduck { --paw: #ffe978; }
+.k-hamster { --paw: #f4d0c1; }
+.k-corgi   { --paw: #fff8ee; }
+
+/* ── 打字状态 ── */
+.m-typing .pet-body { animation: nod 0.45s ease-in-out infinite; }
+@keyframes nod {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-4px) scaleY(0.98); }
+}
+
+/* ── 点击互动动作 ── */
 .a-jump .pet-body { animation: act-jump 0.62s cubic-bezier(0.3, 1.4, 0.5, 1); }
 @keyframes act-jump {
   0%   { transform: translateY(0) scaleY(1); }
-  18%  { transform: translateY(2px) scaleY(0.9) scaleX(1.08); }
-  46%  { transform: translateY(-22px) scaleY(1.1) scaleX(0.93); }
-  74%  { transform: translateY(0) scaleY(0.92) scaleX(1.06); }
+  18%  { transform: translateY(3px) scaleY(0.88) scaleX(1.08); }
+  46%  { transform: translateY(-22px) scaleY(1.08) scaleX(0.94); }
+  74%  { transform: translateY(0) scaleY(0.94) scaleX(1.04); }
   100% { transform: translateY(0) scaleY(1) scaleX(1); }
 }
+
 .a-squash .pet-body { animation: act-squash 0.52s cubic-bezier(0.25, 1.5, 0.4, 1); }
 @keyframes act-squash {
   0%   { transform: scaleY(1) scaleX(1); }
-  28%  { transform: scaleY(0.7) scaleX(1.24); }
-  58%  { transform: scaleY(1.14) scaleX(0.9); }
-  80%  { transform: scaleY(0.96) scaleX(1.03); }
+  28%  { transform: scaleY(0.72) scaleX(1.2); }
+  58%  { transform: scaleY(1.12) scaleX(0.92); }
+  80%  { transform: scaleY(0.97) scaleX(1.02); }
   100% { transform: scaleY(1) scaleX(1); }
 }
+
 .a-shake .pet-body { animation: act-shake 0.52s ease-in-out; }
 @keyframes act-shake {
   0%, 100% { transform: rotate(0deg); }
-  15%      { transform: rotate(-11deg); }
-  38%      { transform: rotate(9deg); }
-  62%      { transform: rotate(-7deg); }
-  85%      { transform: rotate(4deg); }
+  15%      { transform: rotate(-9deg); }
+  38%      { transform: rotate(8deg); }
+  62%      { transform: rotate(-6deg); }
+  85%      { transform: rotate(3deg); }
 }
 
-/* ── 各宠物特征动画 ── */
-.cat-tail {
-  transform-origin: 76px 82px;
-  animation: tail 3s ease-in-out infinite;
+/* ── 角色特有待机晃动 ── */
+.k-lopcat.is-near:not(.a-jump):not(.a-squash):not(.a-shake):not(.m-typing):not(.m-sleep) .pet-body {
+  animation: lop-tilt 1.8s ease-in-out infinite;
 }
-@keyframes tail {
-  0%, 100% { transform: rotate(-8deg); }
-  50%      { transform: rotate(14deg); }
-}
-.m-typing .cat-tail { animation-duration: 1.1s; }
-
-.capy-orange {
-  transform-origin: 50px 25px;
-  animation: orange-bob 3.4s ease-in-out infinite;
-}
-@keyframes orange-bob {
-  0%, 100% { transform: rotate(-5deg); }
-  50%      { transform: rotate(5deg); }
-}
-
-.shiba-tail {
-  transform-origin: 76px 82px;
-  animation: tail 1.8s ease-in-out infinite;
-}
-.shiba-tongue {
-  transform-origin: 50px 59px;
-  animation: pant 1.4s ease-in-out infinite;
-}
-@keyframes pant {
-  0%, 100% { transform: scaleY(0.85); }
-  50%      { transform: scaleY(1.2); }
-}
-
-.duck-sway { animation: sway 2.4s ease-in-out infinite; transform-origin: 50% 94px; }
-@keyframes sway {
-  0%, 100% { transform: rotate(-4deg); }
-  50%      { transform: rotate(4deg); }
-}
-.duck-wing { transform-origin: 34px 74px; animation: flap 2.4s ease-in-out infinite; }
-@keyframes flap {
+@keyframes lop-tilt {
   0%, 100% { transform: rotate(0deg); }
-  50%      { transform: rotate(-18deg); }
+  50%      { transform: rotate(-5deg); }
 }
 
-/* ── 气泡:不透明白底,固定在顶部留白区内,永不遮挡本体 ── */
+.k-psyduck:not(.a-jump):not(.a-squash):not(.a-shake):not(.m-typing):not(.m-sleep) .pet-body {
+  animation: duck-wobble 3s ease-in-out infinite; transform-origin: 50% 92%;
+}
+@keyframes duck-wobble {
+  0%, 100% { transform: rotate(0deg); }
+  25%      { transform: rotate(-4deg); }
+  75%      { transform: rotate(4deg); }
+}
+
+.k-corgi:not(.a-jump):not(.a-squash):not(.a-shake):not(.m-typing):not(.m-sleep) .pet-body {
+  animation: corgi-tilt 5s ease-in-out infinite; transform-origin: 50% 92%;
+}
+@keyframes corgi-tilt {
+  0%, 88%, 100% { transform: rotate(0deg); }
+  94%           { transform: rotate(6deg); }
+}
+
+/* ── 对话气泡 ── */
 .pet-bubble {
   position: absolute;
   left: 50%;
-  top: 2px;
+  bottom: v-bind('bodySize + 4 + "px"');
   transform: translateX(-50%);
-  max-width: 96%;
-  max-height: 44px;
-  overflow: hidden;
-  padding: 5px 9px;
+  width: max-content;
+  max-width: 100%;
+  padding: 6px 10px;
   box-sizing: border-box;
   background: #ffffff;
   color: #26303d;
-  font-size: 12px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.35;
   font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
   border: 1.5px solid #33302e;
-  border-radius: 10px;
-  box-shadow: 0 2px 0 rgba(51, 48, 46, 0.9);
-  white-space: normal;
-  word-break: break-all;
-  animation: pop 0.2s ease-out;
+  border-radius: 9px;
+  box-shadow: 0 3px 6px rgba(0, 0, 0, 0.15);
+  word-break: normal;
+  overflow-wrap: break-word;
+  text-align: center;
+  animation: pop 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
   pointer-events: none;
+  z-index: 10;
 }
-/* 小尾巴指向宠物:两层三角描出描边效果 */
 .pet-bubble::before,
 .pet-bubble::after {
   content: "";
@@ -777,15 +776,13 @@ html, body, #app {
   border-top-color: #ffffff;
   border-width: 5px;
 }
-/* 翻转时气泡不能跟着镜像(文字会反),所以气泡挂在 root 上而非 body 上 */
 @keyframes pop {
-  0%   { opacity: 0; transform: translateX(-50%) translateY(-4px) scale(0.9); }
+  0%   { opacity: 0; transform: translateX(-50%) translateY(6px) scale(0.85); }
   100% { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pet-body, .fx-paw, .fx-spark, .fx-note, .cat-tail, .shiba-tail,
-  .shiba-tongue, .capy-orange, .duck-sway, .duck-wing {
+  .pet-body, .pet-shadow-el, .zzz {
     animation: none !important;
   }
 }

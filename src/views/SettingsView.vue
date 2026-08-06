@@ -3,7 +3,7 @@ import { ref, onMounted, onBeforeUnmount, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAuthStore } from "../stores/auth";
 import { useDisguiseStore } from "../stores/disguise";
-import type { DisguiseSkin, DisguiseMode } from "../stores/disguise";
+import type { DisguiseSkin } from "../stores/disguise";
 import { usePetStore, PET_MIN, PET_MAX, DEFAULT_PET_LINES } from "../stores/pet";
 import type { PetKind } from "../stores/pet";
 import VipLock from "../components/VipLock.vue";
@@ -13,16 +13,14 @@ const disguise = useDisguiseStore();
 const pet = usePetStore();
 
 // ────── M4 皮肤选择 ──────
+// 行为按皮肤自动决定:vscode = 换壳式(真实网页可继续浏览);excel/ppt = 全屏遮蔽
 const SKINS: { key: DisguiseSkin; name: string; desc: string }[] = [
-  { key: "vscode", name: "VS Code", desc: "代码编辑器 + 终端测试输出" },
-  { key: "excel",  name: "Excel",   desc: "预算执行分析表格" },
-  { key: "ppt",    name: "PowerPoint", desc: "季度经营回顾演示" },
+  { key: "vscode", name: "VS Code", desc: "编辑器外壳 · 内容可继续浏览" },
+  { key: "excel",  name: "Excel",   desc: "紧急遮蔽 · 全屏假表格" },
+  { key: "ppt",    name: "PowerPoint", desc: "紧急遮蔽 · 全屏假演示" },
 ];
 function pickSkin(s: DisguiseSkin) {
   disguise.setSkin(s);
-}
-function pickMode(m: DisguiseMode) {
-  disguise.setMode(m);
 }
 
 import lopcatImg from "../images/奶白垂耳猫.png";
@@ -482,48 +480,32 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
         </div>
         <div class="group-content">
           <VipLock feature="disguise" @unlock="onUnlockVip">
-            <!-- 伪装模式:遮蔽式 / 阅读式 -->
-            <div class="row" style="align-items:flex-start">
-              <span class="label">伪装模式</span>
-              <div style="display:flex;flex-direction:column;gap:6px">
-                <label class="radio">
-                  <input type="radio" :checked="disguise.mode === 'cover'" @change="pickMode('cover')" />
-                  <span>遮蔽式 —— 全部盖住,防看最强,摸鱼中断</span>
-                </label>
-                <label class="radio">
-                  <input type="radio" :checked="disguise.mode === 'reading'" @change="pickMode('reading')" />
-                  <span>阅读式 —— 内容仍可读可翻页,防看较弱</span>
-                </label>
+            <!-- 选择伪装皮肤:vscode 换壳可继续浏览,excel/ppt 为全屏紧急遮蔽 -->
+            <div class="skin-list">
+              <div
+                v-for="s in SKINS"
+                :key="s.key"
+                class="skin-card"
+                :class="{ act: disguise.skin === s.key }"
+                @click="pickSkin(s.key)"
+              >
+                <div class="skin-name">{{ s.name }}</div>
+                <div class="skin-desc">{{ s.desc }}</div>
               </div>
             </div>
 
-            <template v-if="disguise.mode === 'cover'">
-              <div class="skin-list">
-                <div
-                  v-for="s in SKINS"
-                  :key="s.key"
-                  class="skin-card"
-                  :class="{ act: disguise.skin === s.key }"
-                  @click="pickSkin(s.key)"
-                >
-                  <div class="skin-name">{{ s.name }}</div>
-                  <div class="skin-desc">{{ s.desc }}</div>
-                </div>
-              </div>
-            </template>
-            <div v-else class="row hint-row">
+            <div class="row hint-row">
               <span class="hint">
-                阅读式把网页染成 VSCode 暗色等宽观感,图片/视频压到几乎不可见。
-                对小说、文章类站点有效;视频站基本没法看,建议那时改用遮蔽式。
+                <b>VS Code</b> 皮肤把真实网页包进编辑器外壳,标签、文件树一应俱全,
+                内容可正常阅读、滚动、切标签;网页会被染成暗色等宽观感,图片/视频压暗以保证伪装度。
+                <b>Excel / PowerPoint</b> 为全屏静态假界面,会中断摸鱼,适合老板已站到身后的紧急场景。
               </span>
             </div>
 
             <div class="row actions">
               <button class="btn primary" @click="emit('previewDisguise')">▶ 立即伪装</button>
               <span class="hint">
-                {{ disguise.mode === 'cover'
-                  ? '当前皮肤:' + (SKINS.find(x => x.key === disguise.skin)?.name ?? '')
-                  : '当前:阅读式' }}
+                当前皮肤:{{ SKINS.find(x => x.key === disguise.skin)?.name ?? '' }}
               </span>
             </div>
           </VipLock>

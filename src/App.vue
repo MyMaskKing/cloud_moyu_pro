@@ -13,6 +13,7 @@ import { useAuthStore } from "./stores/auth";
 import { useDisguiseStore } from "./stores/disguise";
 import { usePetStore, PET_BUBBLE_H } from "./stores/pet";
 import DisguiseOverlay from "./components/DisguiseOverlay.vue";
+import DisguiseChrome from "./components/DisguiseChrome.vue";
 
 // ────── 窗口 / 全局设置 ──────
 const win = getCurrentWindow();
@@ -194,22 +195,32 @@ watch(effectiveOpacity, (v) => {
 async function triggerBossKey() { await invoke("trigger_boss_key"); }
 
 // ────── M4: 伪装皮肤 ──────
-// 两种并存模式(设置里切换):
-//   cover   遮蔽式:DisguiseOverlay 全屏盖住;必须隐藏所有 web-tab 子窗(独立 OS 窗口
-//           不受 DOM 覆盖层遮挡,不隐藏会穿帮),并临时恢复不透明(半透明会露馅)。
-//   reading 阅读式:不盖内容,往各 web-tab 注入暗色等宽样式,原有滚动/点击全部保留。
+// 行为按 skin 推导:
+//   vscode → 换壳式(chrome):主壳切成 DisguiseChrome,真实网页留在编辑区可继续浏览,
+//            靠 set_reading_disguise 把网页染成暗色等宽观感;不关 tab、不 hide 子窗。
+//   excel / ppt → 遮蔽式(cover):DisguiseOverlay 全屏盖住,必须隐藏所有 web-tab 子窗
+//            (独立 OS 窗口不受 DOM 覆盖层遮挡,不隐藏会穿帮),并临时恢复不透明。
 const disguiseAvailable = computed(() => auth.canUse("disguise"));
+/** vscode 换壳伪装激活:主壳切成 DisguiseChrome 包住真实网页 */
+const chromeActive = computed(
+  () => disguiseAvailable.value && disguise.active && disguise.skin === "vscode",
+);
 
 async function enterDisguise() {
   if (!disguiseAvailable.value) return;
+  const isChrome = disguise.skin === "vscode";
+  // 换壳式只对 inline 子窗成立(子窗要对齐到编辑区);非 inline 先收回主窗
+  if (isChrome && tabs.active && tabs.active.mode !== "inline") {
+    await restoreInline(tabs.active.id);
+  }
   disguise.activate();
   // 遮蔽式要把 tab 全收起,与进桌宠同理:先置 collapsing 再关设置页,
   // 否则关设置页的恢复链会和 set_all_tabs_hidden 并发,把 tab 亮回来。
-  const willHideTabs = disguise.mode !== "reading";
+  const willHideTabs = !isChrome;
   if (willHideTabs) collapsing.value = true;
   showSettings.value = false;
   try {
-    if (disguise.mode === "reading") {
+    if (isChrome) {
       await invoke("set_reading_disguise", { enabled: true }).catch(() => {});
     } else {
       await invoke("set_all_tabs_hidden", { hidden: true }).catch(() => {});
@@ -221,12 +232,16 @@ async function enterDisguise() {
 }
 
 async function exitDisguise() {
-  const wasReading = disguise.mode === "reading";
+  const wasChrome = disguise.skin === "vscode";
   disguise.deactivate();
   // 恢复用户设定的透明度
   document.body.style.setProperty("--shell-alpha", String(effectiveOpacity.value));
-  if (wasReading) {
+  if (wasChrome) {
     await invoke("set_reading_disguise", { enabled: false }).catch(() => {});
+    // 模板切回普通布局后 holder 重建,ResizeObserver watch 会自动重新 sync;
+    // 这里再主动 sync 一次,防止布局尚未稳定时子窗停在旧位置
+    await nextTick();
+    syncCurrentTab();
     return;
   }
   const cur = tabs.active;
@@ -474,8 +489,8 @@ async function activateVisual(id: string) {
   await syncCurrentTab();
   // 4) focus 让子窗口接收键鼠事件(Windows 上 show 不自动 focus)
   await invoke("focus_web_tab", { id }).catch(() => {});
-  // 5) 阅读式伪装进行中:新建/切换的 tab 需补注入样式(命令对已注入的窗口幂等)
-  if (disguise.active && disguise.mode === "reading") {
+  // 5) 换壳伪装进行中:新建/切换的 tab 需补注入暗色样式(命令对已注入的窗口幂等)
+  if (disguise.active && disguise.skin === "vscode") {
     await invoke("set_reading_disguise", { enabled: true }).catch(() => {});
   }
 }
@@ -890,12 +905,21 @@ onMounted(async () => {
   };
   unlistenMove = await win.onMoved(onWinChange);
   unlistenResize = await win.onResized(onWinChange);
-  if (holder.value) {
-    ro = new ResizeObserver(() => {
-      if (tabs.active?.mode === "inline") syncCurrentTab();
-    });
-    ro.observe(holder.value);
-  }
+  // holder 会随换壳伪装(fullscreen)等 v-if 分支重建,用 watch 把 RO 重连到当前节点;
+  // 只在 onMounted 里 observe 一次会在分支切换后丢失监听,子窗不再随编辑区尺寸重对齐。
+  ro = new ResizeObserver(() => {
+    if (tabs.active?.mode === "inline") syncCurrentTab();
+  });
+  watch(holder, (el, old) => {
+    if (old) ro?.unobserve(old);
+    if (el) {
+      ro?.observe(el);
+      // 分支刚切完布局可能还没稳,补一帧再 sync,防止子窗停在旧位置
+      nextTick(() => {
+        if (tabs.active?.mode === "inline") syncCurrentTab();
+      });
+    }
+  }, { immediate: true });
   unlistenBoss = await win.listen<boolean>("boss-key-toggled", (evt) => {
     isHidden.value = evt.payload;
     // 恢复时 Windows ShowWindow 可能重置了 WS_EX_LAYERED,重新 apply 透明度
@@ -1060,8 +1084,8 @@ onBeforeUnmount(() => {
       <div class="resize-corner sw" @mousedown="(e) => startResize('SouthWest', e)"></div>
       <div class="resize-corner se" @mousedown="(e) => startResize('SouthEast', e)"></div>
     </template>
-    <!-- 顶部自定义标题栏 -->
-    <header class="titlebar" data-tauri-drag-region>
+    <!-- 顶部自定义标题栏(换壳伪装时由 DisguiseChrome 提供自己的标题栏) -->
+    <header v-if="!chromeActive" class="titlebar" data-tauri-drag-region>
       <span class="brand" data-tauri-drag-region>🐟 云摸鱼</span>
       <div class="drag-spacer" data-tauri-drag-region></div>
       <div class="titlebar-actions">
@@ -1132,8 +1156,8 @@ onBeforeUnmount(() => {
       @close="showSettings = false"
     />
 
-    <!-- fullscreen 模式下隐藏地址栏和 tabbar -->
-    <template v-if="activeTab?.mode !== 'fullscreen'">
+    <!-- fullscreen 模式 / 换壳伪装下隐藏地址栏和 tabbar -->
+    <template v-if="activeTab?.mode !== 'fullscreen' && !chromeActive">
       <!-- 地址栏 + 站点预设 -->
       <div class="toolbar">
         <div class="address">
@@ -1193,7 +1217,21 @@ onBeforeUnmount(() => {
     </template>
 
     <!-- WebView 承载区 -->
-    <main class="content" :class="{ 'fs-content': activeTab?.mode === 'fullscreen' }">
+    <!-- 换壳伪装:用 VSCode 外壳包住真实网页承载区,坐标同步自动贴齐编辑区 -->
+    <DisguiseChrome
+      v-if="chromeActive"
+      @exit="exitDisguise"
+      @switch="switchTab"
+      @close="closeTabById"
+      @open-site="(u) => openSite(u)"
+      @minimize="minimize"
+      @toggle-maximize="toggleMaximize"
+      @close-win="close"
+    >
+      <div ref="holder" class="web-holder"></div>
+    </DisguiseChrome>
+
+    <main v-else class="content" :class="{ 'fs-content': activeTab?.mode === 'fullscreen' }">
       <div ref="holder" class="web-holder">
         <div v-if="!activeTab || activeTab.mode === 'pip' || activeTab.mode === 'popout'" class="hero">
           <h1>🐟 云摸鱼</h1>
@@ -1227,8 +1265,8 @@ onBeforeUnmount(() => {
 
     <!-- 右键菜单已改为独立 Tauri 窗口(能盖住 web-tab),不在 DOM 里渲染 -->
 
-    <!-- M4 伪装皮肤覆盖层:仅遮蔽式模式渲染(阅读式靠注入样式,不盖内容) -->
-    <DisguiseOverlay v-if="disguise.active && disguise.mode === 'cover'" @exit="exitDisguise" />
+    <!-- M4 伪装皮肤覆盖层:仅 excel/ppt 遮蔽式渲染(vscode 走换壳 chrome) -->
+    <DisguiseOverlay v-if="disguise.active && disguise.skin !== 'vscode'" @exit="exitDisguise" />
   </div>
 </template>
 

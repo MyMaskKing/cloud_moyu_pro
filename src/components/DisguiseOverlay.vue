@@ -139,7 +139,7 @@ const pptSlides = [
         <span>⑂ main*</span><span>⊗ 0  ⚠ 0</span>
         <span class="vs-sp"></span>
         <span>行 15,列 42</span><span>空格: 2</span><span>UTF-8</span><span>TypeScript</span>
-        <span class="exit-hot" @click="emit('exit')" title="">🔔</span>
+        <span class="exit-hot" @click="emit('exit')" title="退出伪装">退出伪装</span>
       </div>
     </div>
 
@@ -193,7 +193,7 @@ const pptSlides = [
         <span class="xl-add">＋</span>
         <span class="xl-sp"></span>
         <span>就绪</span>
-        <span class="exit-hot" @click="emit('exit')" title="">田</span>
+        <span class="exit-hot" @click="emit('exit')" title="退出伪装">退出伪装</span>
       </div>
     </div>
 
@@ -255,13 +255,17 @@ const pptSlides = [
   cursor: default;
   font-size: 12px;
 }
-/* 隐蔽退出热区:外观混在状态栏里,hover 才微微提示 */
+/* 明确可见的退出伪装按钮(混在状态栏文字里但有底色,hover 加深) */
 .exit-hot {
   cursor: pointer;
-  opacity: 0.75;
-  padding: 0 4px;
+  opacity: 0.9;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 3px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.16);
 }
-.exit-hot:hover { opacity: 1; background: rgba(255, 255, 255, 0.18); }
+.exit-hot:hover { opacity: 1; background: rgba(255, 255, 255, 0.3); }
 
 /* ══════════ VSCode ══════════ */
 .vs {
@@ -462,6 +466,12 @@ const pptSlides = [
 }
 .xl-add { color: #666; }
 .xl-sp { flex: 1; }
+/* Excel 状态栏是浅底,退出按钮改深底白字才看得清 */
+.xl-sheets .exit-hot {
+  color: #fff;
+  background: #217346;
+}
+.xl-sheets .exit-hot:hover { background: #1a5c38; }
 
 /* ══════════ PPT ══════════ */
 .pp {

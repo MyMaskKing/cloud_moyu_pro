@@ -151,6 +151,38 @@ section{padding:88px 0}
 .feat h3{font-family:var(--display);font-size:17.5px;font-weight:700;margin-bottom:8px}
 .feat p{color:var(--muted);font-size:14px;line-height:1.65}
 
+/* ===== 桌面宠物 ===== */
+.pet-section{background:linear-gradient(180deg,transparent,rgba(52,217,193,.05),transparent)}
+.pet-grid{display:grid;grid-template-columns:1fr 1.05fr;gap:52px;align-items:center}
+.pet-stage-card{position:relative;min-height:340px;background:linear-gradient(180deg,#0F1620,#0B1017);
+  border:1px solid var(--border);border-radius:20px;overflow:hidden;display:grid;place-items:center}
+.pet-stage-card::before{content:"";position:absolute;inset:-40px;background:radial-gradient(closest-side,var(--cyan-glow),transparent);z-index:0}
+.pet-scene{position:relative;z-index:1;display:flex;gap:34px;align-items:flex-end;padding:30px 24px}
+.pet-fig{display:flex;flex-direction:column;align-items:center;gap:10px;cursor:pointer;transition:transform .2s}
+.pet-fig:hover{transform:translateY(-6px)}
+.pet-fig .av{width:74px;height:74px;border-radius:50%;display:grid;place-items:center;font-size:38px;
+  background:var(--elev);border:1px solid var(--border2);box-shadow:0 10px 26px rgba(0,0,0,.4)}
+.pet-fig .nm{font-size:12.5px;color:var(--muted);font-weight:600}
+.pet-fig.on .av{border-color:var(--primary);box-shadow:0 0 0 3px rgba(52,217,193,.18),0 10px 26px rgba(0,0,0,.4)}
+.pet-fig.on .nm{color:var(--text)}
+.pet-bub{position:absolute;top:22px;left:50%;transform:translateX(-50%);background:#fff;color:#26303d;
+  font-size:12.5px;padding:7px 13px;border-radius:10px;border:1.5px solid #33302e;white-space:nowrap;
+  box-shadow:0 6px 16px rgba(0,0,0,.3);opacity:0;transition:opacity .25s}
+.pet-bub.show{opacity:1}
+.pet-bub::after{content:"";position:absolute;left:50%;top:100%;transform:translateX(-50%);
+  border:6px solid transparent;border-top-color:#fff}
+.pet-copy .sec-kicker{text-align:left}
+.pet-copy h2{font-family:var(--display);font-weight:800;font-size:34px;line-height:1.2;letter-spacing:-.6px;margin:12px 0 14px}
+.pet-copy > p{color:var(--muted);font-size:16px;margin-bottom:24px}
+.pet-list{list-style:none;display:flex;flex-direction:column;gap:14px;margin-bottom:28px}
+.pet-list li{display:flex;gap:12px;font-size:14.5px;color:#C8D2DE;align-items:flex-start}
+.pet-list li .pi{width:24px;height:24px;border-radius:7px;background:rgba(52,217,193,.12);
+  border:1px solid rgba(52,217,193,.28);display:grid;place-items:center;font-size:13px;flex-shrink:0}
+.pet-list li b{color:var(--text);font-weight:600}
+.pet-chips{display:flex;flex-wrap:wrap;gap:8px}
+.pet-chips .chip{color:var(--muted)}
+.pet-chips .chip b{color:var(--primary)}
+
 /* ===== Pro 区(收费点) ===== */
 .pro-section{background:linear-gradient(180deg,transparent,rgba(255,140,66,.05),transparent)}
 .pro-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}
@@ -255,6 +287,8 @@ body.boss .bo-hint{display:block}
   .stats{grid-template-columns:repeat(2,1fr)}
   .feat-grid{grid-template-columns:1fr}
   .pro-grid,.price-grid{grid-template-columns:1fr}
+  .pet-grid{grid-template-columns:1fr;gap:36px}
+  .pet-scene{gap:18px}
   .nav-links{display:none}
   .sec-head h2,.final h2{font-size:30px}
   section{padding:64px 0}
@@ -277,6 +311,7 @@ body.boss .bo-hint{display:block}
     </div>
     <div class="nav-links">
       <a href="#features">功能</a>
+      <a href="#pet">桌面宠物</a>
       <a href="#pro">Pro 专属</a>
       <a href="#pricing">定价</a>
       <a href="https://github.com" target="_blank">GitHub</a>
@@ -387,6 +422,40 @@ body.boss .bo-hint{display:block}
   </div>
 </section>
 
+<!-- 桌面宠物 -->
+<section id="pet" class="pet-section">
+  <div class="wrap">
+    <div class="pet-grid">
+      <div class="pet-stage-card">
+        <div class="pet-bub" id="petBub">我帮你看着门~</div>
+        <div class="pet-scene" id="petScene">
+          <div class="pet-fig on" data-line="温柔安静，陪你一起摸鱼~"><div class="av">🐱</div><div class="nm">奶白垂耳猫</div></div>
+          <div class="pet-fig" data-line="压力山大，但还是要冲！"><div class="av">🐥</div><div class="nm">黄色可达鸭</div></div>
+          <div class="pet-fig" data-line="发现你在偷偷摸鱼哦！"><div class="av">🐹</div><div class="nm">雾灰蓝仓鼠</div></div>
+          <div class="pet-fig" data-line="伸个懒腰，摸鱼效率翻倍~"><div class="av">🐶</div><div class="nm">焦糖柯基</div></div>
+        </div>
+      </div>
+      <div class="pet-copy">
+        <div class="sec-kicker pro">✦ M8 · DESKTOP PET · VIP</div>
+        <h2>四只萌宠，常驻桌面陪你摸鱼</h2>
+        <p>摸鱼窗口收起后，桌面留一只小宠物继续陪你。独立透明小窗，轻量不挡操作。奶白垂耳猫、黄色可达鸭、雾灰蓝仓鼠、焦糖柯基——治愈、搞怪、活泼、慵懒，总有一只对得上你的气质。</p>
+        <ul class="pet-list">
+          <li><span class="pi">🖱️</span><span><b>可拖动 / 滚轮缩放</b>：左键随意拖动，滚轮或右键菜单调整大小，放哪停哪</span></li>
+          <li><span class="pi">👀</span><span><b>视线跟随 + 自主漫步</b>：眼神追着鼠标走，空闲时自己踱步、发呆、打瞌睡</span></li>
+          <li><span class="pi">🎈</span><span><b>点击互动 + 气泡台词</b>：单击触发挥手、跳跃、跳舞等连贯动作，台词库可自定义</span></li>
+          <li><span class="pi">⌨️</span><span><b>打字陪敲</b>：检测到你在打字，它会掏出小键盘跟着一起敲（仅 Windows）</span></li>
+        </ul>
+        <div class="pet-chips">
+          <span class="chip">4 只<b> 角色</b></span>
+          <span class="chip">独立<b> 透明窗口</b></span>
+          <span class="chip">自定义<b> 台词库</b></span>
+          <span class="chip">窗口<b> 置顶</b></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- Pro 收费点 -->
 <section id="pro" class="pro-section">
   <div class="wrap">
@@ -456,6 +525,7 @@ body.boss .bo-hint{display:block}
           <li>窗口置顶 + 画中画</li>
           <li class="off">M4 VSCode 伪装皮肤</li>
           <li class="off">M5 工作监测自动隐藏</li>
+          <li class="off">M8 桌面宠物</li>
         </ul>
         <a class="btn btn-ghost" href="#download">免费下载</a>
       </div>
@@ -470,6 +540,7 @@ body.boss .bo-hint{display:block}
           <li>包含社区版全部能力</li>
           <li class="pro-item">M4 · VSCode / Excel / PPT 伪装皮肤</li>
           <li class="pro-item">M5 · 工作软件进程监测自动隐藏</li>
+          <li class="pro-item">M8 · 桌面宠物陪伴(4 角色 · 打字陪敲)</li>
           <li class="pro-item">检测到会议 &lt; 300ms 秒切伪装</li>
           <li class="pro-item">自定义监测名单与触发动作</li>
           <li>优先技术支持</li>
@@ -560,6 +631,23 @@ function cycle(){ setDisguise(!disguised); }
 let timer=setInterval(cycle,3600);
 mockup.addEventListener('mouseenter',()=>clearInterval(timer));
 mockup.addEventListener('mouseleave',()=>timer=setInterval(cycle,2600));
+
+/* 桌面宠物区:点击角色高亮 + 弹出对应气泡,并自动轮播台词 */
+const petBub=document.getElementById('petBub');
+const petFigs=document.querySelectorAll('#petScene .pet-fig');
+let petTimer;
+function showPetBub(fig){
+  petFigs.forEach(f=>f.classList.remove('on'));
+  fig.classList.add('on');
+  petBub.textContent=fig.dataset.line||'';
+  petBub.classList.add('show');
+  clearInterval(petTimer);
+  petTimer=setInterval(()=>petBub.classList.toggle('show',petBub.classList.contains('show')?false:true),2600);
+}
+petFigs.forEach(fig=>fig.addEventListener('click',()=>{
+  clearInterval(petTimer);showPetBub(fig);
+}));
+showPetBub(petFigs[0]);
 
 /* 老板来了彩蛋 */
 const toast=document.getElementById('toast');

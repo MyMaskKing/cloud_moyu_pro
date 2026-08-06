@@ -54,8 +54,8 @@ import corgi05 from "../images/焦糖柯基05.png";
 type PetKind = "lopcat" | "psyduck" | "hamster" | "corgi";
 /** 持续态 */
 type Mood = "idle" | "sleep" | "typing";
-/** 瞬时动作:点击时按序轮换 */
-type PetAction = "" | "jump" | "squash" | "shake";
+/** 瞬时与连贯动作 */
+type PetAction = "" | "jump" | "squash" | "shake" | "dance" | "stretch" | "spin" | "walk";
 type Facing = "left" | "right";
 
 const win = getCurrentWindow();
@@ -92,9 +92,6 @@ const isDragging = ref(false);
 const near = ref(false);
 
 
-/** 点击动作轮换顺序 —— 每次点击取下一个,而不是随机,让人感觉"逗它有反应" */
-const CLICK_ACTIONS: Exclude<PetAction, "">[] = ["jump", "squash", "shake"];
-const ACTION_MS: Record<Exclude<PetAction, "">, number> = { jump: 620, squash: 520, shake: 520 };
 let clickIdx = 0;
 
 const PET_IMAGES: Record<PetKind, { main: string; exprs: string[] }> = {
@@ -119,6 +116,48 @@ const PET_IMAGES: Record<PetKind, { main: string; exprs: string[] }> = {
 const activeExprIdx = ref<number>(-1);
 const randomIdleExprIdx = ref<number>(-1);
 let idleExprTimer: number | undefined;
+let comboTimer: number | undefined;
+
+interface MotionStep {
+  action?: PetAction;
+  exprIdx?: number;
+  facing?: Facing;
+  sayText?: string;
+  durationMs: number;
+}
+
+/** 连贯组合动作序列库 */
+const ACTION_COMBOS: Record<string, MotionStep[]> = {
+  // 连贯套路 1: 萌宠三段欢快跳舞 (蓄力下蹲 -> 高空跳跃 -> 落地摇晃 -> 歪头卖萌)
+  joy_dance: [
+    { action: "squash", exprIdx: 2, durationMs: 320 },
+    { action: "jump", exprIdx: 0, facing: "right", durationMs: 550 },
+    { action: "shake", exprIdx: 3, facing: "left", durationMs: 480 },
+    { action: "stretch", exprIdx: 1, sayText: "哼哼~ 看我给你表演个元气跳舞！", durationMs: 900 }
+  ],
+  // 连贯套路 2: 好奇巡逻 (左右观察 -> 原地小跳调头 -> 凑近镜头 -> 调皮摇摆)
+  curious_patrol: [
+    { facing: "left", exprIdx: 1, durationMs: 380 },
+    { action: "jump", facing: "right", exprIdx: 0, durationMs: 480 },
+    { action: "squash", exprIdx: 2, durationMs: 420 },
+    { action: "shake", exprIdx: 3, sayText: "主人主人，发现你在偷偷摸鱼哦！", durationMs: 850 }
+  ],
+  // 连贯套路 3: 慵懒伸展 (哈欠拉伸 -> 活力弹跳 -> 伸展摇晃)
+  lazy_stretch: [
+    { action: "stretch", exprIdx: 4, durationMs: 550 },
+    { action: "jump", exprIdx: 0, durationMs: 580 },
+    { action: "shake", exprIdx: 3, sayText: "伸个懒腰，摸鱼效率直接翻倍~", durationMs: 800 }
+  ],
+  // 连贯套路 4: 踱步步态 (连贯迈步 -> 抖动 -> 调头)
+  wander_walk: [
+    { action: "walk", facing: "left", exprIdx: 1, durationMs: 450 },
+    { action: "shake", facing: "left", exprIdx: 3, durationMs: 400 },
+    { action: "walk", facing: "right", exprIdx: 0, durationMs: 450 },
+    { action: "", exprIdx: -1, durationMs: 300 }
+  ]
+};
+
+const COMBO_KEYS = ["joy_dance", "curious_patrol", "lazy_stretch"];
 
 // ── 图片双层渐变切换系统 ──
 function getTargetSrc(): string {
@@ -129,6 +168,9 @@ function getTargetSrc(): string {
   if (action.value === "jump") return data.exprs[0] || data.main;
   if (action.value === "squash") return data.exprs[2] || data.main;
   if (action.value === "shake") return data.exprs[3] || data.main;
+  if (action.value === "dance") return data.exprs[0] || data.main;
+  if (action.value === "stretch") return data.exprs[1] || data.main;
+  if (action.value === "walk") return data.exprs[0] || data.main;
   if (activeExprIdx.value >= 0 && data.exprs[activeExprIdx.value]) return data.exprs[activeExprIdx.value];
   if (near.value && data.exprs[0]) return data.exprs[0];
   if (randomIdleExprIdx.value >= 0 && data.exprs[randomIdleExprIdx.value]) return data.exprs[randomIdleExprIdx.value];
@@ -191,21 +233,53 @@ function say(text: string, ms = 2600) {
   bubbleTimer = window.setTimeout(() => { bubble.value = ""; }, ms);
 }
 
-/** 播放一段瞬时动作;结束后自动清空,不影响 idle/typing/sleep 持续态 */
-function playAction(a: Exclude<PetAction, "">) {
+/** 播放连贯组合动作序列 */
+function playComboSequence(steps: MotionStep[]) {
+  if (comboTimer) window.clearTimeout(comboTimer);
   if (actionTimer) window.clearTimeout(actionTimer);
   if (imgSwitchTimer) window.clearTimeout(imgSwitchTimer);
-  // 同一个动作连点时先清空一帧,否则 CSS 动画不会重新触发
+
+  let stepIdx = 0;
+
+  function runNextStep() {
+    if (stepIdx >= steps.length) {
+      action.value = "";
+      imgSwitchTimer = window.setTimeout(() => {
+        activeExprIdx.value = -1;
+      }, 260);
+      return;
+    }
+
+    const step = steps[stepIdx];
+    action.value = "";
+    window.requestAnimationFrame(() => {
+      if (step.action !== undefined) action.value = step.action;
+      if (step.exprIdx !== undefined) activeExprIdx.value = step.exprIdx;
+      if (step.facing !== undefined) facing.value = step.facing;
+      if (step.sayText) say(step.sayText);
+
+      stepIdx++;
+      comboTimer = window.setTimeout(runNextStep, step.durationMs);
+    });
+  }
+
+  runNextStep();
+}
+
+/** 播放一段单步动作;兼容旧接口 */
+function playAction(a: Exclude<PetAction, "">) {
+  if (comboTimer) window.clearTimeout(comboTimer);
+  if (actionTimer) window.clearTimeout(actionTimer);
+  if (imgSwitchTimer) window.clearTimeout(imgSwitchTimer);
   action.value = "";
   window.requestAnimationFrame(() => {
     action.value = a;
     actionTimer = window.setTimeout(() => {
       action.value = "";
-      // 动作结束后稍作延迟再回到主图,避免表情闪烁
       imgSwitchTimer = window.setTimeout(() => {
         activeExprIdx.value = -1;
       }, 280);
-    }, ACTION_MS[a]);
+    }, 600);
   });
 }
 
@@ -251,10 +325,15 @@ function endDrag() {
 function onClick() {
   if (isDragging.value) return;
   resetIdle();
-  playAction(CLICK_ACTIONS[clickIdx % CLICK_ACTIONS.length]);
-  activeExprIdx.value = clickIdx % 5;
+  const comboKey = COMBO_KEYS[clickIdx % COMBO_KEYS.length];
   clickIdx++;
-  if (lines.length) {
+  const steps = ACTION_COMBOS[comboKey];
+  if (steps) {
+    playComboSequence(steps);
+  } else {
+    playAction("jump");
+  }
+  if (lines.length && Math.random() > 0.4) {
     say(lines[Math.floor(Math.random() * lines.length)]);
   }
 }
@@ -338,11 +417,11 @@ async function onMenuPick(key: string) {
   if (m) await applySize(Number(m[1]));
 }
 
-/** 自主漫步:只在原地转个向,不移动窗口(位置由用户决定) */
+/** 自主漫步:播放连贯踱步套路 */
 function tickWander() {
   if (!wander || isDragging.value || mood.value === "sleep") return;
   if (Math.random() > 0.3) return;
-  facing.value = facing.value === "right" ? "left" : "right";
+  playComboSequence(ACTION_COMBOS.wander_walk);
 }
 
 /**
@@ -434,6 +513,7 @@ onBeforeUnmount(() => {
   if (wanderTimer) window.clearInterval(wanderTimer);
   if (imgSwitchTimer) window.clearTimeout(imgSwitchTimer);
   if (idleExprTimer) window.clearInterval(idleExprTimer);
+  if (comboTimer) window.clearTimeout(comboTimer);
   unlistens.forEach((u) => u());
 });
 </script>
@@ -706,6 +786,31 @@ html, body, #app {
   38%      { transform: rotate(8deg); }
   62%      { transform: rotate(-6deg); }
   85%      { transform: rotate(3deg); }
+}
+
+.a-dance .pet-body { animation: act-dance 0.72s cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes act-dance {
+  0%   { transform: translateY(0) rotate(0deg) scale(1); }
+  25%  { transform: translateY(-12px) rotate(-8deg) scaleY(1.05); }
+  50%  { transform: translateY(-4px) rotate(6deg) scaleY(0.96); }
+  75%  { transform: translateY(-10px) rotate(-4deg) scaleY(1.03); }
+  100% { transform: translateY(0) rotate(0deg) scale(1); }
+}
+
+.a-stretch .pet-body { animation: act-stretch 0.6s cubic-bezier(0.25, 1.4, 0.5, 1); }
+@keyframes act-stretch {
+  0%   { transform: scaleY(1) scaleX(1); }
+  35%  { transform: scaleY(1.18) scaleX(0.88) translateY(-6px); }
+  70%  { transform: scaleY(0.92) scaleX(1.06) translateY(2px); }
+  100% { transform: scaleY(1) scaleX(1); }
+}
+
+.a-walk .pet-body { animation: act-walk 0.45s ease-in-out; }
+@keyframes act-walk {
+  0%   { transform: translateY(0) rotate(0deg); }
+  30%  { transform: translateY(-6px) rotate(-4deg) scaleY(1.02); }
+  70%  { transform: translateY(-2px) rotate(3deg) scaleY(0.98); }
+  100% { transform: translateY(0) rotate(0deg); }
 }
 
 /* ── 角色特有待机晃动 ── */

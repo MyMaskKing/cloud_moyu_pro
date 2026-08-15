@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>云摸鱼 · 极致轻量的桌面摸鱼神器</title>
 <meta name="description" content="云摸鱼(cloud_moyu),基于 Tauri 2 + Vue 3 打造,极致轻量、资源占用远低于 Electron 同类。VSCode 伪装皮肤、桌面宠物、工作监测自动隐藏,老板来了也不慌。" />
+<link rel="icon" type="image/svg+xml" href="logo.svg" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -42,8 +43,7 @@ main,.nav,footer{position:relative;z-index:1}
 .nav.scrolled{border-bottom-color:var(--border)}
 .nav-in{display:flex;align-items:center;height:66px}
 .logo{display:flex;align-items:center;gap:10px;font-family:var(--display);font-weight:800;font-size:19px}
-.logo .mk{width:32px;height:32px;border-radius:9px;background:linear-gradient(135deg,var(--primary),#2AA4C9);
-  display:grid;place-items:center;color:var(--primary-ink);font-size:18px;box-shadow:0 6px 20px var(--cyan-glow)}
+.logo .mk{width:32px;height:32px;border-radius:9px;display:block;box-shadow:0 6px 20px var(--cyan-glow)}
 .logo small{font-family:var(--mono);font-size:11px;color:var(--dim);font-weight:500;letter-spacing:.5px}
 .nav-links{display:flex;gap:30px;margin-left:48px}
 .nav-links a{color:var(--muted);font-size:14.5px;font-weight:500;transition:color .15s}
@@ -306,7 +306,7 @@ body.boss .bo-hint{display:block}
 <nav class="nav" id="nav">
   <div class="wrap nav-in">
     <div class="logo">
-      <span class="mk">🐟</span>
+      <img class="mk" src="logo.svg" width="32" height="32" alt="" />
       云摸鱼 <small>cloud_moyu</small>
     </div>
     <div class="nav-links">

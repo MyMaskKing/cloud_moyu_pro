@@ -571,6 +571,34 @@ function removeSite(url: string, ev: MouseEvent) {
   sitesStore.remove(url);
 }
 
+// 站点快捷栏拖拽排序(HTML5 原生拖拽)
+const dragFromUrl = ref<string | null>(null);
+const dragOverUrl = ref<string | null>(null);
+function onSiteDragStart(ev: DragEvent, url: string) {
+  // 改名中不允许拖
+  if (editingUrl.value) { ev.preventDefault(); return; }
+  dragFromUrl.value = url;
+  ev.dataTransfer?.setData("text/plain", url);
+  if (ev.dataTransfer) ev.dataTransfer.effectAllowed = "move";
+}
+function onSiteDragOver(ev: DragEvent, url: string) {
+  if (!dragFromUrl.value || dragFromUrl.value === url) return;
+  ev.preventDefault();
+  if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+  dragOverUrl.value = url;
+}
+function onSiteDrop(ev: DragEvent, url: string) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  if (dragFromUrl.value) sitesStore.reorder(dragFromUrl.value, url);
+  dragFromUrl.value = null;
+  dragOverUrl.value = null;
+}
+function onSiteDragEnd() {
+  dragFromUrl.value = null;
+  dragOverUrl.value = null;
+}
+
 // 行内改名:双击/铅笔按钮进入编辑,回车/失焦提交,Esc 取消
 const editingUrl = ref<string | null>(null);
 const editingBuffer = ref("");
@@ -1086,7 +1114,17 @@ onBeforeUnmount(() => {
     </template>
     <!-- 顶部自定义标题栏(换壳伪装时由 DisguiseChrome 提供自己的标题栏) -->
     <header v-if="!chromeActive" class="titlebar" data-tauri-drag-region>
-      <span class="brand" data-tauri-drag-region>🐟 云摸鱼</span>
+      <span class="brand" data-tauri-drag-region>
+        <svg class="brand-logo" viewBox="0 0 128 128" width="16" height="16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="4" y="4" width="120" height="120" rx="28" fill="#2f6ff0"/>
+          <path fill="#fff" d="M64 32 C56 32 49 35 45 41 C41 40 33 41 29 48 C22 50 16 58 16 68 C16 82 26 90 42 89 C50 91 57 92 64 92 C71 92 78 91 86 89 C102 90 112 82 112 68 C112 58 106 50 99 48 C95 41 87 40 83 41 C79 35 72 32 64 32 Z"/>
+          <path fill="#0a3289" d="M82 61 L97 53 L90 66 L97 79 L81 72 Z"/>
+          <path fill="#1f6ef0" d="M35 56 C40 47 57 44 73 55 C82 61 85 65 83 69 C80 74 66 80 50 75 C41 72 37 66 35 60 Z"/>
+          <circle cx="42" cy="55" r="3.3" fill="#fff"/>
+          <circle cx="43" cy="54.3" r="1.4" fill="#0c2a6b"/>
+        </svg>
+        云摸鱼
+      </span>
       <div class="drag-spacer" data-tauri-drag-region></div>
       <div class="titlebar-actions">
         <label class="opacity" v-if="activeTab?.mode !== 'fullscreen'">
@@ -1180,10 +1218,20 @@ onBeforeUnmount(() => {
             v-for="s in sitesStore.sites"
             :key="s.url"
             class="site"
-            :class="{ active: activeTab?.url === s.url, editing: editingUrl === s.url }"
+            :class="{
+              active: activeTab?.url === s.url,
+              editing: editingUrl === s.url,
+              'dragging': dragFromUrl === s.url,
+              'drag-over': dragOverUrl === s.url,
+            }"
+            draggable="true"
             @click="editingUrl !== s.url && openSite(s.url, s)"
             @dblclick.stop="startRenameSite(s.url, s.name, $event)"
-            :title="s.url + ' · 双击改名'"
+            @dragstart="onSiteDragStart($event, s.url)"
+            @dragover="onSiteDragOver($event, s.url)"
+            @drop="onSiteDrop($event, s.url)"
+            @dragend="onSiteDragEnd"
+            :title="s.url + ' · 双击改名 · 拖动排序'"
           >
             <span class="icon">{{ s.icon }}</span>
             <input
@@ -1234,7 +1282,21 @@ onBeforeUnmount(() => {
     <main v-else class="content" :class="{ 'fs-content': activeTab?.mode === 'fullscreen' }">
       <div ref="holder" class="web-holder">
         <div v-if="!activeTab || activeTab.mode === 'pip' || activeTab.mode === 'popout'" class="hero">
-          <h1>🐟 云摸鱼</h1>
+          <svg class="hero-logo" viewBox="0 0 128 128" width="84" height="84" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <defs>
+              <linearGradient id="hl-tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5aa3ff"/><stop offset=".55" stop-color="#2f6ff0"/><stop offset="1" stop-color="#163fbf"/></linearGradient>
+              <linearGradient id="hl-cloud" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#e4eefc"/></linearGradient>
+              <linearGradient id="hl-fish" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b86ff"/><stop offset="1" stop-color="#0c3a9e"/></linearGradient>
+            </defs>
+            <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#hl-tile)"/>
+            <path fill="url(#hl-cloud)" stroke="#cfe0f6" stroke-width="1" d="M64 32 C56 32 49 35 45 41 C41 40 33 41 29 48 C22 50 16 58 16 68 C16 82 26 90 42 89 C50 91 57 92 64 92 C71 92 78 91 86 89 C102 90 112 82 112 68 C112 58 106 50 99 48 C95 41 87 40 83 41 C79 35 72 32 64 32 Z"/>
+            <path fill="#0a3289" d="M82 61 L97 53 L90 66 L97 79 L81 72 Z"/>
+            <path fill="url(#hl-fish)" d="M35 56 C40 47 57 44 73 55 C82 61 85 65 83 69 C80 74 66 80 50 75 C41 72 37 66 35 60 Z"/>
+            <path d="M42 55 C52 50 65 52 74 58" fill="none" stroke="#a9ccff" stroke-width="2.2" stroke-linecap="round" opacity=".7"/>
+            <circle cx="42" cy="55" r="3.3" fill="#fff"/>
+            <circle cx="43" cy="54.3" r="1.4" fill="#0c2a6b"/>
+          </svg>
+          <h1>云摸鱼</h1>
           <p v-if="activeTab?.mode === 'pip'" class="tag">当前 tab 已进入画中画,浮在屏幕右下</p>
           <p v-else-if="activeTab?.mode === 'popout'" class="tag">当前 tab 已独立浮窗</p>
           <p v-else class="tag">选一个站点开摸,或粘贴网址到地址栏</p>
@@ -1311,7 +1373,8 @@ html, body, #app {
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   flex-shrink: 0;
 }
-.brand { font-size: 13px; letter-spacing: 0.5px; opacity: 0.9; }
+.brand { font-size: 13px; letter-spacing: 0.5px; opacity: 0.9; display: inline-flex; align-items: center; gap: 6px; }
+.brand-logo { display: block; flex-shrink: 0; border-radius: 3px; }
 .titlebar-actions { display: flex; align-items: center; gap: 10px; }
 .drag-spacer { flex: 1; height: 100%; min-width: 40px; }
 .opacity {
@@ -1383,9 +1446,16 @@ html, body, #app {
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.03);
   color: #c9d1d9;
-  cursor: pointer;
+  cursor: grab;
   font-size: 12px; white-space: nowrap;
   transition: all 0.15s;
+}
+.site:active { cursor: grabbing; }
+.site.dragging { opacity: 0.4; }
+.site.drag-over {
+  border-color: #1f6feb;
+  background: rgba(31, 111, 235, 0.15);
+  transform: translateY(-1px);
 }
 .site:hover { background: rgba(255, 255, 255, 0.08); }
 .site.active {
@@ -1465,6 +1535,7 @@ html, body, #app {
   overflow: hidden;
 }
 .hero { text-align: center; }
+.hero-logo { display: block; margin: 0 auto 14px; border-radius: 20px; box-shadow: 0 14px 36px -12px rgba(47,111,240,.6); }
 .hero h1 { margin: 0 0 8px; font-size: 32px; font-weight: 600; }
 .tag { margin: 0 0 6px; color: #8b949e; font-size: 13px; }
 .tip { margin: 12px 0 16px; color: #6e7681; font-size: 11px; }

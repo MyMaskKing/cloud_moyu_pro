@@ -12,6 +12,14 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 const DEFAULT_BOSS_KEY: &str = "Ctrl+Alt+KeyQ";
 
+/// 外链子窗(web-tab-*)使用的现代 Chrome UA。
+/// macOS WKWebView 默认 UA 不含高版本 Chrome 标识,会被 B站等站点判为"浏览器版本过旧"拦截;
+/// 显式声明一个现代 Chrome UA 通过版本门禁,与 Windows 上 WebView2 的真实 Chrome UA 表现更一致。
+const WEB_TAB_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+     AppleWebKit/537.36 (KHTML, like Gecko) \
+     Chrome/122.0.0.0 Safari/537.36";
+
 /// 全局隐藏态(老板键切换用)
 static HIDDEN: AtomicBool = AtomicBool::new(false);
 /// 当前已注册的老板键
@@ -543,6 +551,7 @@ async fn open_web_tab(
         .inner_size(width, height)
         .position(x, y)
         .initialization_script(init_script)
+        .user_agent(WEB_TAB_USER_AGENT)
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -850,7 +859,19 @@ async fn set_web_tab_opacity(app: AppHandle, id: String, opacity: f64) -> Result
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{msg_send, runtime::AnyObject};
+        let raw = win.ns_window().map_err(|e| e.to_string())? as *mut AnyObject;
+        // 64 位 Apple 平台 CGFloat 即 f64,直接传 f64 ABI 兼容;
+        // setAlphaValue: 与 Windows SetLayeredWindowAttributes(LWA_ALPHA) 语义对等(整窗 alpha 0~1)
+        let alpha = opacity.clamp(0.0, 1.0);
+        unsafe {
+            let _: () = msg_send![raw, setAlphaValue: alpha];
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (win, opacity);
     }

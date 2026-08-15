@@ -469,6 +469,7 @@ dependencies = [
 name = "cloud-moyu"
 version = "0.1.0"
 dependencies = [
+ "objc2",
  "serde",
  "serde_json",
  "sysinfo",

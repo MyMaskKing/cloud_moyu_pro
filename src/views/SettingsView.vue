@@ -91,6 +91,7 @@ const props = defineProps<{
   workMonitorKeywords: string[];
   workAppPresent: boolean;
   bossAction: "hide" | "pet";
+  popoutTheme: "dark" | "light" | "system";
 }>();
 
 const emit = defineEmits<{
@@ -103,6 +104,7 @@ const emit = defineEmits<{
   (e: "update:workMonitorAction", v: "disguise" | "hide"): void;
   (e: "update:workMonitorKeywords", v: string[]): void;
   (e: "update:bossAction", v: "hide" | "pet"): void;
+  (e: "update:popoutTheme", v: "dark" | "light" | "system"): void;
   (e: "previewDisguise"): void;
   (e: "previewPet"): void;
   (e: "close"): void;
@@ -413,6 +415,46 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
               <button class="btn" @click="cancelRecord">取消</button>
               <span class="hint">按 Esc 取消</span>
             </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- 独立窗口标题栏主题 -->
+      <div class="group">
+        <div class="group-title">🪟 独立窗口标题栏</div>
+        <div class="group-desc">
+          标签页"独立浮窗(popout)"模式下,顶部自绘标题栏的配色。鼠标移到窗口最顶端会滑出,可拖动、置顶、最小化或收回摸鱼窗。
+        </div>
+        <div class="group-content">
+          <div class="row" style="align-items:flex-start">
+            <span class="label">标题栏配色</span>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <label class="radio">
+                <input
+                  type="radio"
+                  :checked="popoutTheme === 'dark'"
+                  @change="emit('update:popoutTheme', 'dark')"
+                />
+                <span>深色 —— 深色半透明底,浅色字</span>
+              </label>
+              <label class="radio">
+                <input
+                  type="radio"
+                  :checked="popoutTheme === 'light'"
+                  @change="emit('update:popoutTheme', 'light')"
+                />
+                <span>浅色 —— 浅色半透明底,深色字</span>
+              </label>
+              <label class="radio">
+                <input
+                  type="radio"
+                  :checked="popoutTheme === 'system'"
+                  @change="emit('update:popoutTheme', 'system')"
+                />
+                <span>跟随系统 —— 自动匹配系统深浅色</span>
+              </label>
+              <span class="hint">改动会立即应用到已打开的独立浮窗。</span>
+            </div>
           </div>
         </div>
       </div>

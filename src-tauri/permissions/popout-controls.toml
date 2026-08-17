@@ -1,0 +1,14 @@
+# 自定义命令 ACL:允许 remote(https)webview 调用 popout 自绘标题栏的窗口控制
+# 这些命令按注入的 tab id 操作"调用方自身那个子窗口",无跨窗/任意句柄能力:
+#   start_drag 仅开始拖动;toggle_maximize 仅切换自身最大化;
+#   window_action 的 close 只 emit 收回事件(切回 inline),不销毁数据,minimize 仅最小化自身。
+# 与 signal_pin_toggle 同属"remote 页面内注入脚本调用"的信任模型。
+
+[[permission]]
+identifier = "allow-popout-controls"
+description = "允许 remote webview 操作自身 popout 窗口(拖动/最大化/最小化/收回)"
+commands.allow = [
+    "popout_start_drag",
+    "popout_toggle_maximize",
+    "popout_window_action",
+]

@@ -286,6 +286,7 @@ async fn open_web_tab(
             } catch (e) {}
             try { document.dispatchEvent(new Event('fullscreenchange')); } catch (e) {}
             try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch (e) {}
+            try { window.__muoyuSetFs && window.__muoyuSetFs(true); } catch (e) {}
             invoke('signal_video_fullscreen', { id: TAB_ID, entering: true });
           }
           // 退出:先还原样式 + 派 fullscreenchange 让站点收到"退出"消息,
@@ -315,6 +316,7 @@ async fn open_web_tab(
             } catch (e) {}
             try { document.dispatchEvent(new Event('fullscreenchange')); } catch (e) {}
             try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch (e) {}
+            try { window.__muoyuSetFs && window.__muoyuSetFs(false); } catch (e) {}
             invoke('signal_video_fullscreen', { id: TAB_ID, entering: false });
           }
           const proto = Element.prototype;
@@ -415,129 +417,163 @@ async fn open_web_tab(
             }
           }, true);
 
-          // ── popout 悬浮置顶按钮 ──
-          //   系统标题栏保留,页面右上角贴一个小巧半透明的 📌;可拖动改位置(存 localStorage)
-          //   仅 popout 模式显示;鼠标移开会淡出,避免长时间挡住网页
-          //   状态由主窗通过 notify_web_tab_mode → window.__muoyuOnMode 推送
-          var pinBtn = null;
-          var PIN_POS_KEY = '__muoyu_pin_pos_v1';
-          function loadPinPos() {
-            try {
-              var raw = localStorage.getItem(PIN_POS_KEY);
-              if (!raw) return null;
-              var p = JSON.parse(raw);
-              if (typeof p.right !== 'number' || typeof p.top !== 'number') return null;
-              return p;
-            } catch (e) { return null; }
+          // ── popout 自绘极简标题栏 ──
+          //   popout 改为 decorations=false(无系统标题栏),由这里画一条 34px 标题栏:
+          //   平时隐藏,鼠标碰到窗口最顶部 5px 热区时滑出,离开约 0.9s 后收回,不挡网页。
+          //   左侧网页标题(可拖动窗口/双击最大化),右侧 📌置顶 / ➖最小化 / ✕收回摸鱼窗。
+          //   主题(深/浅/跟随系统)由主窗通过 __muoyuOnMode 下发。
+          var tbBar = null, tbPin = null, tbHideTimer = null, tbInFs = false, tbActive = false;
+          var TB_THEME = 'system';
+          function tbPalette(name) {
+            if (name === 'dark') return { bg:'rgba(22,27,34,.92)', fg:'#c9d1d9', hover:'rgba(255,255,255,.10)', closeBg:'#e81123', closeFg:'#fff' };
+            if (name === 'light') return { bg:'rgba(245,246,248,.94)', fg:'#1f2328', hover:'rgba(0,0,0,.07)', closeBg:'#e81123', closeFg:'#fff' };
+            return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? tbPalette('dark') : tbPalette('light');
           }
-          function savePinPos(right, top) {
-            try { localStorage.setItem(PIN_POS_KEY, JSON.stringify({ right: right, top: top })); } catch (e) {}
+          function tbApplyTheme() {
+            if (!tbBar) return;
+            var p = tbPalette(TB_THEME);
+            tbBar.style.background = p.bg;
+            tbBar.style.color = p.fg;
+            var btns = tbBar.querySelectorAll('[data-tb-btn]');
+            for (var i = 0; i < btns.length; i++) {
+              var b = btns[i];
+              b.style.color = p.fg;
+              b.setAttribute('data-tb-hover', b.getAttribute('data-tb-close') !== null ? p.closeBg : p.hover);
+              if (b.getAttribute('data-tb-close') !== null) b.setAttribute('data-tb-close-fg', p.closeFg);
+            }
           }
-          function applyPinPos() {
-            if (!pinBtn) return;
-            var p = loadPinPos() || { right: 6, top: 6 };
-            // 边界限制:保证按钮完全可见
-            var maxRight = Math.max(0, (window.innerWidth || 800) - 22);
-            var maxTop = Math.max(0, (window.innerHeight || 600) - 22);
-            var r = Math.min(Math.max(p.right, 0), maxRight);
-            var t = Math.min(Math.max(p.top, 0), maxTop);
-            pinBtn.style.right = r + 'px';
-            pinBtn.style.top = t + 'px';
-            pinBtn.style.left = 'auto';
+          function tbShow() {
+            if (!tbBar || tbInFs) return;
+            if (tbHideTimer) { clearTimeout(tbHideTimer); tbHideTimer = null; }
+            tbBar.style.transform = 'translateY(0)';
+            tbBar.style.pointerEvents = 'auto';
           }
-          function ensurePinBtn() {
-            if (pinBtn) return pinBtn;
-            pinBtn = document.createElement('div');
-            pinBtn.setAttribute('data-muoyu-pin', '');
-            pinBtn.style.cssText = [
-              'position:fixed', 'top:6px', 'right:6px',
-              'width:22px', 'height:22px', 'border-radius:4px',
-              'background:rgba(22,27,34,0.55)', 'color:#c9d1d9',
-              'display:none', 'align-items:center', 'justify-content:center',
-              'font-size:11px', 'cursor:grab', 'user-select:none',
-              'z-index:2147483646', 'box-shadow:0 1px 3px rgba(0,0,0,.3)',
-              'border:1px solid rgba(255,255,255,.06)',
-              'opacity:0.35', 'transition:opacity .18s, background .15s, color .15s'
+          function tbScheduleHide() {
+            if (tbHideTimer) clearTimeout(tbHideTimer);
+            tbHideTimer = setTimeout(function() {
+              if (!tbBar) return;
+              tbBar.style.transform = 'translateY(-100%)';
+              tbBar.style.pointerEvents = 'none';
+              tbHideTimer = null;
+            }, 900);
+          }
+          function tbCancelHide() { if (tbHideTimer) { clearTimeout(tbHideTimer); tbHideTimer = null; } }
+          function tbUpdateTitle() {
+            if (!tbBar) return;
+            var t = (document.title || location.hostname || '').trim();
+            var el = tbBar.querySelector('[data-tb-title]');
+            if (el) el.textContent = t;
+          }
+          function ensureTitlebar() {
+            if (tbBar) return tbBar;
+            var host = document.documentElement || document.body;
+            // 标题栏本体
+            tbBar = document.createElement('div');
+            tbBar.setAttribute('data-muoyu-titlebar', '');
+            tbBar.style.cssText = [
+              'position:fixed','top:0','left:0','right:0','height:34px',
+              'display:flex','align-items:center',
+              'padding:0 6px 0 12px','box-sizing:border-box',
+              'font:12px/1 -apple-system,Segoe UI,Microsoft YaHei,sans-serif',
+              'z-index:2147483646','pointer-events:none',
+              'transform:translateY(-100%)','transition:transform .18s ease',
+              'box-shadow:0 1px 6px rgba(0,0,0,.18)','will-change:transform'
             ].join(';') + ';';
-            pinBtn.title = '窗口置顶(可拖动)';
-            pinBtn.textContent = '📌';
-            pinBtn.__pinned = false;
-            pinBtn.addEventListener('mouseenter', function() {
-              pinBtn.style.opacity = '1';
-              if (!pinBtn.__pinned) pinBtn.style.background = 'rgba(31,111,235,.85)';
-            });
-            pinBtn.addEventListener('mouseleave', function() {
-              pinBtn.style.opacity = pinBtn.__pinned ? '1' : '0.35';
-              pinBtn.style.background = pinBtn.__pinned
-                ? 'rgba(31,111,235,.85)'
-                : 'rgba(22,27,34,0.55)';
-            });
-            // 拖拽 or 点击:mousemove 距离 > 4px 判为拖拽;否则松手时视为点击
-            var dragStart = null;
-            var didDrag = false;
-            pinBtn.addEventListener('mousedown', function(e) {
+            var title = document.createElement('div');
+            title.setAttribute('data-tb-title', '');
+            title.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.85;padding-right:8px;';
+            tbBar.appendChild(title);
+            function mkBtn(sym, key, titleText, isClose) {
+              var b = document.createElement('div');
+              b.setAttribute('data-tb-btn', '');
+              if (isClose) b.setAttribute('data-tb-close', '');
+              b.textContent = sym;
+              b.title = titleText;
+              b.style.cssText = 'width:30px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:4px;cursor:pointer;font-size:13px;user-select:none;transition:background .12s;';
+              b.addEventListener('mouseenter', function() {
+                if (b.__pinned) return; // 置顶态保持蓝底,hover 不覆盖
+                b.style.background = b.getAttribute('data-tb-hover') || 'rgba(127,127,127,.2)';
+                if (isClose) b.style.color = b.getAttribute('data-tb-close-fg') || '#fff';
+              });
+              b.addEventListener('mouseleave', function() {
+                if (b.__pinned) return; // 置顶态保持蓝底
+                b.style.background = 'transparent';
+                if (isClose) b.style.color = tbPalette(TB_THEME).fg;
+              });
+              b.addEventListener('click', function(e) {
+                e.stopPropagation();
+                if (key === 'pin') {
+                  var next = !b.__pinned;
+                  invoke('signal_pin_toggle', { id: TAB_ID, pinned: next });
+                  applyPinVisual(next);
+                } else if (key === 'min') {
+                  invoke('popout_window_action', { id: TAB_ID, action: 'minimize' });
+                } else if (key === 'close') {
+                  invoke('popout_window_action', { id: TAB_ID, action: 'close' });
+                }
+              });
+              return b;
+            }
+            tbPin = mkBtn('📌', 'pin', '窗口置顶', false);
+            tbBar.appendChild(tbPin);
+            tbBar.appendChild(mkBtn('➖', 'min', '最小化', false));
+            tbBar.appendChild(mkBtn('✕', 'close', '收回摸鱼窗口', true));
+            // 拖动窗口 / 双击最大化:点在按钮上不触发
+            tbBar.addEventListener('mousedown', function(e) {
               if (e.button !== 0) return;
+              if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-tb-btn')) return;
               e.preventDefault();
-              var rect = pinBtn.getBoundingClientRect();
-              dragStart = {
-                sx: e.clientX, sy: e.clientY,
-                startRight: (window.innerWidth || 800) - rect.right,
-                startTop: rect.top
-              };
-              didDrag = false;
-              pinBtn.style.cursor = 'grabbing';
-              pinBtn.style.transition = 'none';
+              if (e.detail >= 2) invoke('popout_toggle_maximize', { id: TAB_ID });
+              else invoke('popout_start_drag', { id: TAB_ID });
             });
+            tbBar.addEventListener('mouseenter', tbCancelHide);
+            tbBar.addEventListener('mouseleave', tbScheduleHide);
+            host.appendChild(tbBar);
+            // 顶部热区:用 document 捕获式 mousemove 判"光标距顶 ≤5px",
+            //   不放置任何 DOM 元素,避免拦截窗口上边缘的原生 resize 和外站点击
             document.addEventListener('mousemove', function(e) {
-              if (!dragStart) return;
-              var dx = e.clientX - dragStart.sx;
-              var dy = e.clientY - dragStart.sy;
-              if (!didDrag && Math.abs(dx) + Math.abs(dy) < 4) return;
-              didDrag = true;
-              var newRight = dragStart.startRight - dx;
-              var newTop = dragStart.startTop + dy;
-              var maxRight = Math.max(0, (window.innerWidth || 800) - 22);
-              var maxTop = Math.max(0, (window.innerHeight || 600) - 22);
-              newRight = Math.min(Math.max(newRight, 0), maxRight);
-              newTop = Math.min(Math.max(newTop, 0), maxTop);
-              pinBtn.style.right = newRight + 'px';
-              pinBtn.style.top = newTop + 'px';
-              pinBtn.style.left = 'auto';
+              if (!tbActive || tbInFs) return;
+              if (e.clientY <= 5) tbShow();
             }, true);
-            document.addEventListener('mouseup', function(e) {
-              if (!dragStart) return;
-              pinBtn.style.cursor = 'grab';
-              pinBtn.style.transition = 'opacity .18s, background .15s, color .15s';
-              if (didDrag) {
-                // 保存位置
-                var rect = pinBtn.getBoundingClientRect();
-                savePinPos((window.innerWidth || 800) - rect.right, rect.top);
-              } else {
-                // 未拖动 = 点击
-                var next = !pinBtn.__pinned;
-                invoke('signal_pin_toggle', { id: TAB_ID, pinned: next });
-                applyPinVisual(next);
-              }
-              dragStart = null;
-              didDrag = false;
-            }, true);
-            (document.documentElement || document.body).appendChild(pinBtn);
-            applyPinPos();
-            return pinBtn;
+            // 标题变化(SPA 切页)
+            tbUpdateTitle();
+            setInterval(tbUpdateTitle, 1500);
+            try {
+              var mo = new MutationObserver(tbUpdateTitle);
+              var tEl = document.querySelector('title');
+              if (tEl) mo.observe(tEl, { childList: true, subtree: true });
+            } catch (e) {}
+            // 跟随系统主题变化
+            if (window.matchMedia) {
+              try { window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() { if (TB_THEME === 'system') tbApplyTheme(); }); } catch (e) {}
+            }
+            return tbBar;
           }
           function applyPinVisual(pinned) {
-            var el = ensurePinBtn();
-            el.__pinned = pinned;
-            el.style.background = pinned ? 'rgba(31,111,235,.85)' : 'rgba(22,27,34,0.55)';
-            el.style.color = pinned ? '#fff' : '#c9d1d9';
-            el.style.opacity = pinned ? '1' : '0.35';
-            el.title = pinned ? '取消置顶(可拖动)' : '窗口置顶(可拖动)';
+            if (!tbPin) return;
+            tbPin.__pinned = pinned;
+            tbPin.style.background = pinned ? 'rgba(31,111,235,.85)' : 'transparent';
+            tbPin.style.color = pinned ? '#fff' : tbPalette(TB_THEME).fg;
+            tbPin.title = pinned ? '取消置顶' : '窗口置顶';
           }
-          // 主窗调:window.__muoyuOnMode(mode, pinned)
-          window.__muoyuOnMode = function(mode, pinned) {
-            var el = ensurePinBtn();
-            el.style.display = (mode === 'popout') ? 'flex' : 'none';
+          // 主窗调:window.__muoyuOnMode(mode, pinned, theme)
+          //   theme: 'dark' | 'light' | 'system'
+          window.__muoyuOnMode = function(mode, pinned, theme) {
+            ensureTitlebar();
+            var show = mode === 'popout';
+            tbActive = show;
+            tbBar.style.display = show ? 'flex' : 'none';
+            if (!show) { tbCancelHide(); tbBar.style.transform = 'translateY(-100%)'; tbBar.style.pointerEvents = 'none'; }
+            if (theme === 'dark' || theme === 'light' || theme === 'system') TB_THEME = theme;
+            tbApplyTheme();
             applyPinVisual(!!pinned);
+            if (show) tbUpdateTitle();
+          };
+          // 网页内全屏(fake fullscreen)期间强制隐藏标题栏,避免挡视频
+          window.__muoyuSetFs = function(inFs) {
+            tbInFs = !!inFs;
+            if (tbInFs) { tbCancelHide(); if (tbBar) { tbBar.style.transform = 'translateY(-100%)'; tbBar.style.pointerEvents = 'none'; } }
           };
         })();
     "#;
@@ -723,7 +759,8 @@ fn set_web_tab_owner(app: AppHandle, id: String, owner: bool) -> Result<(), Stri
     {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
-            SetWindowLongPtrW, GWLP_HWNDPARENT,
+            GetWindowLongPtrW, SetWindowLongPtrW,
+            GWLP_HWNDPARENT, GWL_EXSTYLE, WS_EX_APPWINDOW,
         };
 
         let raw = win.hwnd().map_err(|e| e.to_string())?;
@@ -738,6 +775,15 @@ fn set_web_tab_owner(app: AppHandle, id: String, owner: bool) -> Result<(), Stri
         };
 
         unsafe {
+            // popout/pip(owner=false):无边框窗口默认不进任务栏,显式加 WS_EX_APPWINDOW
+            //   让它有独立任务栏按钮;inline(owner=true)挂回主窗时移除该标志。
+            let ex = GetWindowLongPtrW(child_hwnd, GWL_EXSTYLE);
+            let ex2 = if owner {
+                ex & !(WS_EX_APPWINDOW.0 as isize)
+            } else {
+                ex | WS_EX_APPWINDOW.0 as isize
+            };
+            SetWindowLongPtrW(child_hwnd, GWL_EXSTYLE, ex2);
             SetWindowLongPtrW(child_hwnd, GWLP_HWNDPARENT, new_owner);
         }
     }
@@ -1142,16 +1188,62 @@ fn signal_pin_toggle(app: AppHandle, id: String, pinned: bool) -> Result<(), Str
     Ok(())
 }
 
-/// 主窗通知子 webview:当前 tab 模式(popout/inline/pip/fullscreen)+ 置顶状态,
-/// 子 webview 里的注入脚本据此显示/隐藏悬浮的置顶按钮
+/// 主窗通知子 webview:当前 tab 模式(popout/inline/pip/fullscreen)+ 置顶状态 + 标题栏主题,
+/// 子 webview 里的注入脚本据此显示/隐藏自绘标题栏并套用深/浅色
 #[tauri::command]
-fn notify_web_tab_mode(app: AppHandle, id: String, mode: String, pinned: bool) -> Result<(), String> {
+fn notify_web_tab_mode(app: AppHandle, id: String, mode: String, pinned: bool, theme: Option<String>) -> Result<(), String> {
     if let Some(win) = app.get_webview_window(&tab_label(&id)) {
+        let theme_js = match theme.as_deref() {
+            Some("dark") | Some("light") | Some("system") => format!("{:?}", theme.as_deref().unwrap()),
+            _ => "\"system\"".to_string(),
+        };
         let js = format!(
-            "try {{ window.__muoyuOnMode && window.__muoyuOnMode({:?}, {}); }} catch(e) {{}}",
-            mode, pinned
+            "try {{ window.__muoyuOnMode && window.__muoyuOnMode({:?}, {}, {}); }} catch(e) {{}}",
+            mode, pinned, theme_js
         );
         let _ = win.eval(&js);
+    }
+    Ok(())
+}
+
+/// popout 自绘标题栏:按下空白处开始拖动窗口。
+/// 必须 async:start_dragging 要窗口消息循环继续转,同步命令会自锁(同本文件其它几何命令)。
+#[tauri::command]
+async fn popout_start_drag(app: AppHandle, id: String) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(&tab_label(&id)) {
+        win.start_dragging().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// popout 自绘标题栏:双击标题栏切换最大化/还原。async 同理。
+#[tauri::command]
+async fn popout_toggle_maximize(app: AppHandle, id: String) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(&tab_label(&id)) {
+        if win.is_maximized().unwrap_or(false) {
+            win.unmaximize().map_err(|e| e.to_string())?;
+        } else {
+            win.maximize().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// popout 自绘标题栏按钮:最小化 / 收回摸鱼窗(切回 inline,不销毁 tab)。
+/// close 不直接关窗,而是复用 web-tab-close-requested 事件,交由主窗决定收回逻辑。
+#[tauri::command]
+async fn popout_window_action(app: AppHandle, id: String, action: String) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(&tab_label(&id)) {
+        match action.as_str() {
+            "minimize" => { win.minimize().map_err(|e| e.to_string())?; }
+            "close" => {
+                let _ = app.emit(
+                    "web-tab-close-requested",
+                    serde_json::json!({ "id": id.clone(), "label": tab_label(&id) }),
+                );
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -1539,6 +1631,9 @@ pub fn run() {
             set_web_tab_pinned,
             signal_pin_toggle,
             notify_web_tab_mode,
+            popout_start_drag,
+            popout_toggle_maximize,
+            popout_window_action,
             set_work_monitor_config,
             set_all_tabs_hidden,
             set_reading_disguise,

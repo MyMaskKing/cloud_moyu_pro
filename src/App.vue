@@ -31,6 +31,8 @@ const STORAGE_KEY = "moyu-settings-v1";
 type WorkAction = "disguise" | "hide";
 /** M8 老板键触发时的动作 */
 type BossAction = "hide" | "pet";
+/** popout 独立窗口自绘标题栏主题 */
+type PopoutTheme = "dark" | "light" | "system";
 interface Settings {
   autoHide: boolean;
   autoHideDelay: number;
@@ -45,6 +47,8 @@ interface Settings {
   workMonitorKeywords: string[];
   /** M8:老板键动作 —— 直接隐藏 / 变成桌面宠物 */
   bossAction: BossAction;
+  /** popout 独立窗口自绘标题栏主题:深色 / 浅色 / 跟随系统 */
+  popoutTheme: PopoutTheme;
 }
 const DEFAULT_WORK_KEYWORDS = [
   "dingtalk", "钉钉",
@@ -64,6 +68,7 @@ const defaults: Settings = {
   workMonitorAction: "disguise",
   workMonitorKeywords: [...DEFAULT_WORK_KEYWORDS],
   bossAction: "hide",
+  popoutTheme: "system",
 };
 const loaded: Settings = (() => {
   try {
@@ -81,6 +86,7 @@ const workMonitor = ref(loaded.workMonitor);
 const workMonitorAction = ref<WorkAction>(loaded.workMonitorAction);
 const workMonitorKeywords = ref<string[]>(loaded.workMonitorKeywords);
 const bossAction = ref<BossAction>(loaded.bossAction);
+const popoutTheme = ref<PopoutTheme>(loaded.popoutTheme);
 /** 摸鱼主窗口是否置顶 */
 const mainPinned = ref(false);
 /** 透明度临时绕过:快捷键翻转;true = 强制不透明(方便操作),不改动 opacity 存的值 */
@@ -102,7 +108,7 @@ const popoutTitle = (t: { title?: string; url: string }) =>
 
 watch(
   [autoHide, autoHideDelay, videoAutoLandscape, bossKey, transparencyKey,
-   workMonitor, workMonitorAction, workMonitorKeywords, bossAction],
+   workMonitor, workMonitorAction, workMonitorKeywords, bossAction, popoutTheme],
   () => {
     localStorage.setItem(
       STORAGE_KEY,
@@ -116,21 +122,39 @@ watch(
         workMonitorAction: workMonitorAction.value,
         workMonitorKeywords: workMonitorKeywords.value,
         bossAction: bossAction.value,
+        popoutTheme: popoutTheme.value,
       }),
     );
   },
   { deep: true },
 );
 
+// 标题栏主题改动 → 立刻推给所有已打开的 popout 子窗,无需重开
+watch(popoutTheme, () => {
+  for (const t of tabs.tabs) {
+    if (t.mode === "popout") notifyTabMode(t.id);
+  }
+});
+
 // bossKey 改动 → 刷新所有 pip/popout 的窗口标题(标题里显示当前老板键)
 watch(bossKey, () => {
   for (const t of tabs.tabs) {
-    if (t.mode === "pip" || t.mode === "popout") {
+    if (t.mode === "pip") {
+      // pip 保留系统标题栏
       invoke("set_web_tab_chrome", {
         id: t.id,
         decorations: true,
         skipTaskbar: false,
-        alwaysOnTop: t.mode === "pip",
+        alwaysOnTop: true,
+        title: popoutTitle(t),
+      }).catch(() => {});
+    } else if (t.mode === "popout") {
+      // popout 用自绘标题栏:无系统边框(标题文字不可见,仅维持接口一致)
+      invoke("set_web_tab_chrome", {
+        id: t.id,
+        decorations: false,
+        skipTaskbar: false,
+        alwaysOnTop: !!t.pinned,
         title: popoutTitle(t),
       }).catch(() => {});
     }
@@ -162,11 +186,16 @@ async function togglePopoutPin(id: string) {
   await notifyTabMode(id);
 }
 
-/** 把 tab 当前的 mode + pinned 推送给子 webview(用于内嵌浮动按钮显示/态) */
+/** 把 tab 当前的 mode + pinned + 标题栏主题推送给子 webview(用于自绘标题栏显隐/配色) */
 async function notifyTabMode(id: string) {
   const t = tabs.tabs.find((x) => x.id === id);
   if (!t) return;
-  await invoke("notify_web_tab_mode", { id, mode: t.mode, pinned: !!t.pinned }).catch(() => {});
+  await invoke("notify_web_tab_mode", {
+    id,
+    mode: t.mode,
+    pinned: !!t.pinned,
+    theme: popoutTheme.value,
+  }).catch(() => {});
 }
 
 // 无边框窗口边缘 8 方向 resize 触发器
@@ -803,7 +832,7 @@ async function togglePip() {
   }
 }
 
-/** 独立浮窗:大尺寸+可缩放+系统标题栏(可拖可关) */
+/** 独立浮窗:大尺寸+可缩放+自绘标题栏(无系统边框,深/浅/跟随系统) */
 async function popOut(id?: string) {
   const t = id ? tabs.tabs.find((x) => x.id === id) : tabs.active;
   if (!t) return;
@@ -812,10 +841,10 @@ async function popOut(id?: string) {
   const y = Math.round((window.screen.availHeight - h) / 2);
   await invoke("enter_pip", { id: t.id, x, y, width: w, height: h });
   await invoke("set_web_tab_resizable", { id: t.id, resizable: true });
-  // 开系统标题栏,进任务栏,取消置顶——完全独立可操作
+  // popout:无系统标题栏,改用注入脚本里的自绘标题栏(可拖/置顶/最小化/收回)
   await invoke("set_web_tab_chrome", {
     id: t.id,
-    decorations: true,
+    decorations: false,
     skipTaskbar: false,
     alwaysOnTop: false,
     title: popoutTitle(t),
@@ -969,11 +998,16 @@ onMounted(async () => {
   // pip / popout / fullscreen 按 ✕ = 收回摸鱼窗口;inline ✕(理论不会触发) = 真关
   unlistenCloseReq = await win.listen<{ id: string; label: string }>(
     "web-tab-close-requested",
-    (evt) => {
+    async (evt) => {
       const t = tabs.tabs.find((x) => x.id === evt.payload.id);
       if (!t) return;
       if (t.mode !== "inline") {
-        restoreInline(t.id);
+        // 自绘 ✕ 不像系统标题栏按钮那样会自动激活 owner 主窗;
+        // 若主窗被压在其它窗口下(或最小化),收回的子窗会飘在主窗位置却不在主窗里。
+        // 先把主窗拉回前台再恢复。
+        try { await win.unminimize(); } catch { /* 未最小化时无操作 */ }
+        try { await win.setFocus(); } catch { /* 跨平台置前失败可忽略 */ }
+        await restoreInline(t.id);
       } else {
         tabs.closeTab(t.id);
       }
@@ -1180,6 +1214,7 @@ onBeforeUnmount(() => {
       :work-monitor-keywords="workMonitorKeywords"
       :work-app-present="workAppPresent"
       :boss-action="bossAction"
+      :popout-theme="popoutTheme"
       @update:auto-hide="autoHide = $event"
       @update:auto-hide-delay="autoHideDelay = $event"
       @update:video-auto-landscape="videoAutoLandscape = $event"

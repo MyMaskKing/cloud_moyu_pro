@@ -444,7 +444,7 @@ async fn open_web_tab(
             }
           }
           function tbShow() {
-            if (!tbBar || tbInFs) return;
+            if (!tbBar) return;
             if (tbHideTimer) { clearTimeout(tbHideTimer); tbHideTimer = null; }
             tbBar.style.transform = 'translateY(0)';
             tbBar.style.pointerEvents = 'auto';
@@ -476,7 +476,7 @@ async fn open_web_tab(
               'display:flex','align-items:center',
               'padding:0 6px 0 12px','box-sizing:border-box',
               'font:12px/1 -apple-system,Segoe UI,Microsoft YaHei,sans-serif',
-              'z-index:2147483646','pointer-events:none',
+              'z-index:2147483647','pointer-events:none',
               'transform:translateY(-100%)','transition:transform .18s ease',
               'box-shadow:0 1px 6px rgba(0,0,0,.18)','will-change:transform'
             ].join(';') + ';';
@@ -531,9 +531,10 @@ async fn open_web_tab(
             tbBar.addEventListener('mouseleave', tbScheduleHide);
             host.appendChild(tbBar);
             // 顶部热区:用 document 捕获式 mousemove 判"光标距顶 ≤5px",
-            //   不放置任何 DOM 元素,避免拦截窗口上边缘的原生 resize 和外站点击
+            //   不放置任何 DOM 元素,避免拦截窗口上边缘的原生 resize 和外站点击。
+            //   网页全屏(fake fullscreen)期间也允许滑出标题栏(类似 YouTube 全屏顶栏)。
             document.addEventListener('mousemove', function(e) {
-              if (!tbActive || tbInFs) return;
+              if (!tbActive) return;
               if (e.clientY <= 5) tbShow();
             }, true);
             // 标题变化(SPA 切页)

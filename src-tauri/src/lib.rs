@@ -563,6 +563,13 @@ async fn open_web_tab(
             ensureTitlebar();
             var show = mode === 'popout';
             tbActive = show;
+            if (show) {
+              // 从"应用内全屏"直接切到独立窗口时,网页内 fake fullscreen 仍在
+              //   (视频被 position:fixed 撑满、tbInFs=true),会盖住标题栏并让标题栏无法滑出。
+              //   进 popout 时退出它,还原视频样式并复位 tbInFs。
+              //   主窗监听收到 signal(fullscreen,false)时因 mode 已是 popout 会直接 return,无副作用。
+              try { if (typeof exitFake === 'function') exitFake(); } catch (e) {}
+            }
             tbBar.style.display = show ? 'flex' : 'none';
             if (!show) { tbCancelHide(); tbBar.style.transform = 'translateY(-100%)'; tbBar.style.pointerEvents = 'none'; }
             if (theme === 'dark' || theme === 'light' || theme === 'system') TB_THEME = theme;

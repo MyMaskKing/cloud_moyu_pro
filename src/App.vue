@@ -59,6 +59,9 @@ function closeForceUpdate() {
   if (forceUpdateClosable.value) forceUpdateVisible.value = false;
 }
 
+// 更新窗优先显示;若同时需要弹打赏,更新窗关闭后再弹(强制更新窗不可关,打赏就不弹)
+const dashangPending = ref(false);
+
 // 启动弹窗(打赏/强制更新)显示时,子窗是独立 OS 窗口会盖在主窗弹窗之上,
 // 必须一并隐藏;弹窗关闭后再把当前活跃 tab 恢复出来。
 watch([dashangVisible, forceUpdateVisible], ([ds, fu], [prevDs, prevFu]) => {
@@ -66,13 +69,23 @@ watch([dashangVisible, forceUpdateVisible], ([ds, fu], [prevDs, prevFu]) => {
   const becameHidden = (prevDs && !ds) || (prevFu && !fu);
   if (becameVisible) {
     invoke("set_all_tabs_hidden", { hidden: true }).catch(() => {});
-  } else if (becameHidden && !dashangVisible.value && !forceUpdateVisible.value) {
-    const t = tabs.active;
-    if (!t) return;
-    if (t.mode === "inline" || t.mode === "fullscreen") {
-      activateVisual(t.id);
-    } else {
-      invoke("set_web_tab_visible", { id: t.id, visible: true }).catch(() => {});
+  } else if (becameHidden) {
+    // 更新窗关闭后若还需弹打赏,接着弹(保持子窗隐藏,不要先恢复再藏导致闪烁)
+    if (dashangPending.value) {
+      dashangPending.value = false;
+      if (!dashangHiddenBefore()) {
+        dashangVisible.value = true;
+        return;
+      }
+    }
+    if (!dashangVisible.value && !forceUpdateVisible.value) {
+      const t = tabs.active;
+      if (!t) return;
+      if (t.mode === "inline" || t.mode === "fullscreen") {
+        activateVisual(t.id);
+      } else {
+        invoke("set_web_tab_visible", { id: t.id, visible: true }).catch(() => {});
+      }
     }
   }
 });
@@ -1049,6 +1062,10 @@ onMounted(async () => {
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
       forceUpdateVisible.value = true;
+      // 更新窗优先;打赏若也需要,等更新窗关闭后再弹
+      if (cfg.popDashang && !dashangHiddenBefore()) {
+        dashangPending.value = true;
+      }
       return;
     }
     if (cfg.popDashang && !dashangHiddenBefore()) {

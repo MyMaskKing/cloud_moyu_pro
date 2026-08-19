@@ -3,15 +3,19 @@
 // 后续改后端地址、静态资源地址、超时,只改本文件即可。
 // ─────────────────────────────────────────────────────────────
 
+import pkg from "../../package.json";
+
 /** 所有远端请求的统一超时时间(毫秒) */
 export const REQUEST_TIMEOUT_MS = 60_000;
 
 /**
- * 本地"强制更新"版本号。
- * 与远端配置 remoteConfig.forceUpdate.version 比较:不一致即视为需要强制更新。
- * 发布新版本需要强制更新时,把这里改成远端下发的 version(整数)。
+ * 本地版本号 = 应用自身版本(直接读 package.json,无需手写、不会脱节)。
+ * 与远端 lastUpdate.version 比较:不一致即视为需要更新,每次启动都弹更新窗。
+ * 发版时只需改 package.json 的 version,并把远端 moyu.json 的 version 同步为同一个值,
+ * 新装最新版的用户本地版本 == 远端版本,不会被提示。
+ * 注意:比较是字符串相等,远端 version 请填与 package.json 一致的语义化版本(如 "0.1.0")。
  */
-export const LOCAL_FORCE_UPDATE_VERSION = 1;
+export const LOCAL_FORCE_UPDATE_VERSION: string = pkg.version;
 
 /**
  * 远端接口清单。
@@ -25,10 +29,10 @@ export const ENDPOINTS = {
    * 返回:
    *   {
    *     "popDashang": boolean,      // 是否在启动时弹出打赏弹窗
-   *     "lastUpdate": {             // version 与本地不一致时,每次启动都弹更新窗
+   *     "lastUpdate": {             // version 与本地(package.json)不一致时每次启动弹
    *       "url": string,            //   下载/更新页地址(系统浏览器打开)
    *       "message": string,        //   更新说明,多段用逗号或换行分隔
-   *       "version": string|number  //   远端最新版本号
+   *       "version": string         //   远端最新版本号,须为语义化版本如 "0.1.0"
    *     },
    *     "forcedUpdate": boolean     // true=更新窗不可关闭(只能立即更新);
    *                                 // false=可关闭,但下次启动仍会再弹
@@ -62,8 +66,8 @@ export interface ForceUpdateInfo {
   url: string;
   /** 更新说明,多段用逗号或换行分隔 */
   message: string;
-  /** 远端最新版本号(字符串或数字,比较时按字符串规范化) */
-  version: string | number;
+  /** 远端最新版本号,语义化版本如 "0.1.0",与本地 package.json.version 比较 */
+  version: string;
 }
 
 export interface RemoteConfig {

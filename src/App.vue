@@ -983,6 +983,12 @@ async function restoreInline(id: string) {
   // fullscreen 模式从未改过 chrome / owner / resizable / always_on_top,
   // 退出时不要跑那一串"恢复"调用——多余不说,某些平台上还会因窗口样式重算导致抖动
   const fromFullscreen = t?.mode === "fullscreen";
+  if (fromFullscreen) {
+    // 应用内全屏是靠子页面的 fake fullscreen(套 position:fixed + body overflow:hidden)撑起来的。
+    // 光重置窗口几何不够,必须让子页面执行 exitFullscreen 还原样式,
+    // 否则退出后页面无法上下滚动、滚动条消失。
+    await invoke("exit_web_tab_fullscreen", { id }).catch(() => {});
+  }
   if (!fromFullscreen) {
     await invoke("exit_pip", { id }).catch(() => {});
     await invoke("set_web_tab_resizable", { id, resizable: false });

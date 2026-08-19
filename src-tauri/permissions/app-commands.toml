@@ -29,6 +29,7 @@ commands.allow = [
     "signal_video_play",
     "signal_video_fullscreen",
     "request_video_fullscreen",
+    "exit_web_tab_fullscreen",
     "show_context_menu",
     "hide_context_menu",
     "is_hidden",

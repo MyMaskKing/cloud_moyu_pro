@@ -1214,6 +1214,28 @@ fn request_video_fullscreen(app: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 主窗口退出"应用内全屏"时调用:让子页面执行 exitFullscreen。
+/// init_script hook 了 exitFullscreen → exitFake(),会还原被套成 fixed 的播放器样式
+/// 以及 documentElement/body 的 overflow:hidden。不主动调它,这俩样式会残留,
+/// 表现为退出全屏后页面无法上下滚动、滚动条消失。
+#[tauri::command]
+fn exit_web_tab_fullscreen(app: AppHandle, id: String) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(&tab_label(&id)) {
+        let js = r#"
+            (function(){
+                try {
+                    if (document.fullscreenElement || document.webkitFullscreenElement) {
+                        if (document.exitFullscreen) document.exitFullscreen();
+                        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+                    }
+                } catch(e) {}
+            })();
+        "#;
+        let _ = win.eval(js);
+    }
+    Ok(())
+}
+
 // ────── M3: 老板键 ──────
 
 /// 让指定 web tab 静音 / 恢复。原理:eval 一段 JS,把页面里所有 <video> <audio> 的 muted 置位。
@@ -1788,6 +1810,7 @@ pub fn run() {
             signal_video_play,
             signal_video_fullscreen,
             request_video_fullscreen,
+            exit_web_tab_fullscreen,
             show_context_menu,
             hide_context_menu,
             is_hidden,

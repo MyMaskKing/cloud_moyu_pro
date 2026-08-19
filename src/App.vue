@@ -13,8 +13,11 @@ import { useAuthStore } from "./stores/auth";
 import { useDisguiseStore } from "./stores/disguise";
 import { usePetStore, PET_BUBBLE_H } from "./stores/pet";
 import { useUserScriptsStore } from "./stores/userscripts";
+import { fetchRemoteConfig, DASHANG_IMAGES, LOCAL_FORCE_UPDATE_VERSION } from "./config/api";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import DisguiseOverlay from "./components/DisguiseOverlay.vue";
 import DisguiseChrome from "./components/DisguiseChrome.vue";
+import ZoomableImage from "./components/ZoomableImage.vue";
 
 // ────── 窗口 / 全局设置 ──────
 const win = getCurrentWindow();
@@ -27,6 +30,52 @@ const auth = useAuthStore();
 const disguise = useDisguiseStore();
 const pet = usePetStore();
 const userScripts = useUserScriptsStore();
+
+// ────── 启动打赏弹窗(由远端配置 popDashang 控制) ──────
+const DASHANG_HIDE_KEY = "moyu-dashang-hidden";
+const dashangVisible = ref(false);
+const dashangNeverRef = ref<HTMLInputElement | null>(null);
+const dashangImages = DASHANG_IMAGES;
+function dashangHiddenBefore(): boolean {
+  return localStorage.getItem(DASHANG_HIDE_KEY) === "1";
+}
+function closeDashang(neverAgain: boolean) {
+  if (neverAgain) localStorage.setItem(DASHANG_HIDE_KEY, "1");
+  dashangVisible.value = false;
+}
+
+// ────── 更新弹窗(远端 lastUpdate.version 与本地不一致时,每次启动都弹) ──────
+const forceUpdateVisible = ref(false);
+// forcedUpdate=true = 强制:弹窗不可关闭,只能"立即更新";false = 可关,但下次启动仍弹
+const forceUpdateClosable = ref(false);
+const forceUpdateUrl = ref("");
+const forceUpdateLines = ref<string[]>([]);
+function openForceUpdate() {
+  if (forceUpdateUrl.value) {
+    openUrl(forceUpdateUrl.value).catch(() => {});
+  }
+}
+function closeForceUpdate() {
+  if (forceUpdateClosable.value) forceUpdateVisible.value = false;
+}
+
+// 启动弹窗(打赏/强制更新)显示时,子窗是独立 OS 窗口会盖在主窗弹窗之上,
+// 必须一并隐藏;弹窗关闭后再把当前活跃 tab 恢复出来。
+watch([dashangVisible, forceUpdateVisible], ([ds, fu], [prevDs, prevFu]) => {
+  const becameVisible = (!prevDs && ds) || (!prevFu && fu);
+  const becameHidden = (prevDs && !ds) || (prevFu && !fu);
+  if (becameVisible) {
+    invoke("set_all_tabs_hidden", { hidden: true }).catch(() => {});
+  } else if (becameHidden && !dashangVisible.value && !forceUpdateVisible.value) {
+    const t = tabs.active;
+    if (!t) return;
+    if (t.mode === "inline" || t.mode === "fullscreen") {
+      activateVisual(t.id);
+    } else {
+      invoke("set_web_tab_visible", { id: t.id, visible: true }).catch(() => {});
+    }
+  }
+});
 
 const STORAGE_KEY = "moyu-settings-v1";
 /** M5 检测到工作应用后执行的动作 */
@@ -409,8 +458,9 @@ watch(() => pet.alwaysOnTop, (on) => {
  */
 async function restoreTabsVisual() {
   // 设置页开着时它占满整个主壳,任何 tab 显示出来都会盖在它上面。
+  // 启动弹窗(打赏/强制更新)期间同理,子窗会穿帮盖住弹窗,必须保持隐藏。
   // Rust 恢复时对 WEB_TABS 全部 show() 了,这里必须把它们全收回去。
-  if (showSettings.value) {
+  if (showSettings.value || dashangVisible.value || forceUpdateVisible.value) {
     for (const t of tabs.tabs) {
       if (t.mode !== "pip") {
         await invoke("set_web_tab_visible", { id: t.id, visible: false }).catch(() => {});
@@ -527,7 +577,9 @@ async function activateVisual(id: string) {
   // 2) 只对 inline/fullscreen 的 tab 做隐藏切换;popout/pip 是脱离主壳的浮动窗口,不动
   //    注意:上面几个 await 期间用户可能已经打开了设置页(它占满主壳),
   //    此时任何 show 都会盖在设置页上,所以这里必须重新判定而不能只信入口状态。
-  const shouldShow = !showSettings.value;
+  //    启动弹窗(打赏/强制更新)期间同理:子窗是独立 OS 窗口会盖在弹窗之上,必须保持隐藏。
+  const shouldShow =
+    !showSettings.value && !dashangVisible.value && !forceUpdateVisible.value;
   for (const other of tabs.tabs) {
     if (other.mode === "pip" || other.mode === "popout") continue;
     const visible = shouldShow && other.id === id;
@@ -974,6 +1026,35 @@ onMounted(async () => {
   auth.init().catch(() => {});
   // 把已持久化的用户脚本下发到 Rust(冷启动恢复后)
   syncUserScripts();
+  // 拉取远端启动配置:
+  //  - forcedUpdate=true 且 lastUpdate.version 与本地不一致 → 弹强制更新(优先,不可关闭,不处理打赏)
+  //  - 否则 popDashang=true 且未选"不再提示"时弹打赏窗
+  // 网络失败/超时静默忽略,不影响启动。
+  fetchRemoteConfig().then((cfg) => {
+    if (!cfg) return;
+    // 更新弹窗:lastUpdate.version 与本地不一致 → 每次启动都弹。
+    // forcedUpdate=true 时弹窗不可关闭(只能去更新);false 时可关,下次启动仍会再弹。
+    const fu = cfg.lastUpdate;
+    if (
+      fu &&
+      fu.url &&
+      String(fu.version).trim() !== "" &&
+      String(fu.version) !== String(LOCAL_FORCE_UPDATE_VERSION)
+    ) {
+      forceUpdateUrl.value = fu.url;
+      forceUpdateClosable.value = cfg.forcedUpdate !== true;
+      // message 按逗号或换行分割成多段
+      forceUpdateLines.value = String(fu.message ?? "")
+        .split(/[,\n]/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      forceUpdateVisible.value = true;
+      return;
+    }
+    if (cfg.popDashang && !dashangHiddenBefore()) {
+      dashangVisible.value = true;
+    }
+  });
   // 主窗口移动/缩放 → 根据当前 tab mode 同步
   const onWinChange = () => {
     const t = tabs.active;
@@ -1386,6 +1467,48 @@ onBeforeUnmount(() => {
 
     <!-- M4 伪装皮肤覆盖层:仅 excel/ppt 遮蔽式渲染(vscode 走换壳 chrome) -->
     <DisguiseOverlay v-if="disguise.active && disguise.skin !== 'vscode'" @exit="exitDisguise" />
+
+    <!-- 启动打赏弹窗 -->
+    <div v-if="dashangVisible" class="ds-mask" @click.self="closeDashang(false)">
+      <div class="ds-dialog">
+        <button class="ds-x" @click="closeDashang(false)" title="关闭">✕</button>
+        <h3 class="ds-title">支持云摸鱼 ☕</h3>
+        <p class="ds-sub">如果这个小工具让你摸鱼愉快,欢迎请作者喝杯咖啡</p>
+        <div class="ds-qrs">
+          <div v-for="img in dashangImages" :key="img.url" class="ds-qr">
+            <ZoomableImage :src="img.url" :alt="img.name" img-class="ds-qr-img" />
+            <span>{{ img.name }}</span>
+          </div>
+        </div>
+        <label class="ds-never">
+          <input type="checkbox" ref="dashangNeverRef" />
+          <span>以后不再弹出</span>
+        </label>
+        <button class="btn primary ds-close" @click="closeDashang(!!dashangNeverRef?.checked)">
+          关闭
+        </button>
+      </div>
+    </div>
+
+    <!-- 更新弹窗:version 与本地不一致时每次启动都弹;forcedUpdate=true 时不可关闭 -->
+    <div v-if="forceUpdateVisible" class="ds-mask" @click.self="closeForceUpdate">
+      <div class="ds-dialog fu-dialog">
+        <button v-if="forceUpdateClosable" class="ds-x" @click="closeForceUpdate" title="关闭">✕</button>
+        <h3 class="ds-title">发现新版本</h3>
+        <p class="ds-sub">
+          {{ forceUpdateClosable ? '有新版本可用,建议更新' : '当前版本过低,请更新后继续使用' }}
+        </p>
+        <ul v-if="forceUpdateLines.length" class="fu-notes">
+          <li v-for="(line, i) in forceUpdateLines" :key="i">{{ line }}</li>
+        </ul>
+        <button class="btn primary fu-update-btn" @click="openForceUpdate">立即更新</button>
+        <button
+          v-if="forceUpdateClosable"
+          class="btn fu-later-btn"
+          @click="closeForceUpdate"
+        >稍后再说</button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -1637,4 +1760,95 @@ html, body, #app {
 .resize-corner.ne { top: 0; right: 0; width: 8px; height: 8px; cursor: ne-resize; }
 .resize-corner.sw { bottom: 0; left: 0; width: 8px; height: 8px; cursor: sw-resize; }
 .resize-corner.se { bottom: 0; right: 0; width: 8px; height: 8px; cursor: se-resize; }
+
+/* 启动打赏弹窗 */
+.ds-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  backdrop-filter: blur(2px);
+}
+.ds-dialog {
+  position: relative;
+  width: 420px;
+  max-width: calc(100% - 32px);
+  background: #1b2230;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 22px 22px 18px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+  color: #e6edf3;
+}
+.ds-x {
+  position: absolute;
+  top: 12px; right: 12px;
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-size: 15px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px;
+}
+.ds-x:hover { color: #f0f6fc; }
+.ds-title { margin: 0 0 6px; font-size: 18px; text-align: center; }
+.ds-sub { margin: 0 0 18px; font-size: 12px; color: #8b949e; text-align: center; }
+.ds-qrs {
+  display: flex;
+  gap: 18px;
+  justify-content: center;
+}
+.ds-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #c9d1d9;
+}
+.ds-qr img {
+  width: 150px;
+  height: 150px;
+  border-radius: 8px;
+  background: #fff;
+  object-fit: contain;
+}
+.ds-never {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 16px 0 12px;
+  font-size: 12px;
+  color: #8b949e;
+  cursor: pointer;
+}
+.ds-never input { accent-color: #58a6ff; }
+.ds-close { width: 100%; padding: 8px; }
+
+/* 更新弹窗按钮:flex 居中,避免文字偏移 */
+.fu-dialog .fu-update-btn,
+.fu-dialog .fu-later-btn {
+  width: 100%;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+/* 更新弹窗 */
+.fu-dialog { width: 380px; }
+.fu-notes {
+  margin: 0 0 18px;
+  padding-left: 20px;
+  font-size: 13px;
+  color: #c9d1d9;
+  line-height: 1.7;
+}
+.fu-notes li { list-style: disc; }
 </style>

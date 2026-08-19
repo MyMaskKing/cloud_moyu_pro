@@ -7,7 +7,9 @@ import type { DisguiseSkin } from "../stores/disguise";
 import { usePetStore, PET_MIN, PET_MAX, DEFAULT_PET_LINES } from "../stores/pet";
 import type { PetKind } from "../stores/pet";
 import { useUserScriptsStore } from "../stores/userscripts";
+import { DASHANG_IMAGES } from "../config/api";
 import VipLock from "../components/VipLock.vue";
+import ZoomableImage from "../components/ZoomableImage.vue";
 
 const auth = useAuthStore();
 const disguise = useDisguiseStore();
@@ -36,6 +38,14 @@ function moveScript(id: string, dir: -1 | 1) {
 }
 function toggleScript(id: string, on: boolean) {
   userScripts.setEnabled(id, on);
+}
+
+const dashangImages = DASHANG_IMAGES;
+const DASHANG_HIDE_KEY = "moyu-dashang-hidden";
+const dashangHidden = ref(localStorage.getItem(DASHANG_HIDE_KEY) === "1");
+function resetDashangHidden() {
+  localStorage.removeItem(DASHANG_HIDE_KEY);
+  dashangHidden.value = false;
 }
 
 // ────── M4 皮肤选择 ──────
@@ -820,6 +830,27 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
                 <span v-if="scriptError" class="hint error">{{ scriptError }}</span>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 打赏支持 -->
+      <div class="group">
+        <div class="group-title">☕ 支持云摸鱼</div>
+        <div class="group-desc">
+          如果这个小工具让你摸鱼愉快,欢迎扫码请作者喝杯咖啡。
+          启动时是否弹出此窗口由远端配置控制。
+        </div>
+        <div class="group-content">
+          <div class="ds-qrs">
+            <div v-for="img in dashangImages" :key="img.url" class="ds-qr">
+              <ZoomableImage :src="img.url" :alt="img.name" img-class="ds-qr-img" />
+              <span>{{ img.name }}</span>
+            </div>
+          </div>
+          <div v-if="dashangHidden" class="row" style="margin-top:12px">
+            <span class="hint">你之前选择了"不再弹出",</span>
+            <button class="btn" @click="resetDashangHidden">重新启用启动弹窗</button>
           </div>
         </div>
       </div>

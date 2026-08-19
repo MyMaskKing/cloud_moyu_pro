@@ -12,6 +12,7 @@ import TabBar from "./components/TabBar.vue";
 import { useAuthStore } from "./stores/auth";
 import { useDisguiseStore } from "./stores/disguise";
 import { usePetStore, PET_BUBBLE_H } from "./stores/pet";
+import { useUserScriptsStore } from "./stores/userscripts";
 import DisguiseOverlay from "./components/DisguiseOverlay.vue";
 import DisguiseChrome from "./components/DisguiseChrome.vue";
 
@@ -25,6 +26,7 @@ const sitesStore = useSitesStore();
 const auth = useAuthStore();
 const disguise = useDisguiseStore();
 const pet = usePetStore();
+const userScripts = useUserScriptsStore();
 
 const STORAGE_KEY = "moyu-settings-v1";
 /** M5 检测到工作应用后执行的动作 */
@@ -128,6 +130,24 @@ watch(
   },
   { deep: true },
 );
+
+// 用户脚本:把启用脚本全集下发到 Rust,新建子窗时拼进 init_script。
+// 脚本在子窗创建时注入,增删改后需重开标签才生效(无运行时重注册 API)。
+function syncUserScripts() {
+  invoke("set_user_scripts", {
+    scripts: userScripts.scripts.map((s) => ({
+      id: s.id,
+      name: s.name,
+      code: s.code,
+      matches: s.matches,
+      includes: s.includes,
+      excludes: s.excludes,
+      runAt: s.runAt,
+      enabled: s.enabled,
+    })),
+  }).catch((e) => console.error("set_user_scripts failed", e));
+}
+watch(() => userScripts.scripts, syncUserScripts, { deep: true });
 
 // 标题栏主题改动 → 立刻推给所有已打开的 popout 子窗,无需重开
 watch(popoutTheme, () => {
@@ -952,6 +972,8 @@ onMounted(async () => {
   await nextTick();
   // 鉴权状态初始化(异步拉取,不阻塞主窗口)
   auth.init().catch(() => {});
+  // 把已持久化的用户脚本下发到 Rust(冷启动恢复后)
+  syncUserScripts();
   // 主窗口移动/缩放 → 根据当前 tab mode 同步
   const onWinChange = () => {
     const t = tabs.active;

@@ -53,4 +53,5 @@ commands.allow = [
     "set_pet_typing",
     "is_pet_mode",
     "pet_say",
+    "set_user_scripts",
 ]

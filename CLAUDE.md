@@ -58,7 +58,7 @@ pnpm tauri build                # 完整打包（前端 + Rust release + 安装�
 1. 拦截 `window.open` 和 `target="_blank"` 点击 → 同 tab 内跳转，避免弹出系统窗
 2. Hook `Element.prototype.requestFullscreen` 及各前缀 → 派发 `signal_video_fullscreen`，由主窗做"应用内全屏"（给目标元素套 `position:fixed;z-index:2147483647`）；ESC/F 退出
 3. 监听 `<video>` play/playing/timeupdate，在"视频播放页 + 横屏 + 时长>60s + 宽≥480"时派发 `signal_video_play`，主窗按用户设置决定是否自动横屏/PiP；SPA 切页通过 URL 变化重置触发锁
-4. popout 模式下注入 📌 按钮，拖拽存 localStorage，点击派发 `signal_pin_toggle`
+4. popout 模式下自绘标题栏与 📌 按钮：注入右上角可拖动的置顶按钮（位置存 localStorage，点击派发 `signal_pin_toggle`）；并因 popout 关闭了系统装饰，注入一套自绘窗口控件——拖动走 `popout_start_drag`，最小化/收回走 `popout_window_action`，最大化/还原走 `popout_toggle_maximize`（均只操作"调用方自身那个子窗"，按注入的 tab id 定位）
 
 `request_video_fullscreen`（主窗 → 子窗）优先模拟站点自己的全屏按钮（YouTube/B 站等 selector 列表），找不到才回退到对播放器容器 `requestFullscreen`。改选择器时这两处都要顾到。
 
@@ -68,7 +68,9 @@ pnpm tauri build                # 完整打包（前端 + Rust release + 安装�
 
 1. 在 `lib.rs` 的 `tauri::generate_handler![...]` 注册
 2. 在 `app-commands.toml` 的 `commands.allow` 里追加
-3. 如果要让**外链网页**（remote URL）调用，还需在 `capabilities/web-tabs.json` 的 `permissions` 里追加（当前只有 `signal_video_play/fullscreen`、`signal_pin_toggle` 对 remote 放开）
+3. 如果要让**外链网页**（remote URL）调用，还需在 `capabilities/web-tabs.json` 的 `permissions` 里追加。当前对 remote 放开的命令拆成两组 permission，各自定义在 `src-tauri/permissions/` 下：
+   - `video-signals.toml`：`signal_video_play` / `signal_video_fullscreen` / `signal_pin_toggle`
+   - `popout-controls.toml`：`popout_start_drag` / `popout_toggle_maximize` / `popout_window_action`（popout 自绘标题栏用，按注入的 tab id 只操作"调用方自身那个子窗"，无跨窗/任意句柄能力）
 
 `capabilities/` 下四个文件按窗口 label 授权：`default.json`（main）、`web-tabs.json`（`web-tab-*`，含 remote url 通配）、`ctx-menu.json`、`pet.json`。新增窗口 label 时要同步加 capability。
 
@@ -88,6 +90,7 @@ pnpm tauri build                # 完整打包（前端 + Rust release + 安装�
 - `src/stores/`：`tabs`、`sites`（快捷栏预设，`moyu-sites-v2`，含 v1→v2 迁移）、`disguise`（`moyu-disguise-v1`）、`pet`（`moyu-pet-v1`）、`auth`。所有持久化都用带版本号的 localStorage key，改 schema 时写迁移而不是改名丢数据。
 - `src/components/DisguiseChrome.vue`：VSCode 换壳式伪装（包住真实网页继续浏览）。
 - `src/components/DisguiseOverlay.vue`：Excel/PPT 遮蔽式伪装（全屏静态假界面）。
+- `src/views/SettingsView.vue`（~1040 行，App.vue 内挂的设置面板，**非独立窗口**）：集中 M4 皮肤、M8 桌宠等 VIP 设置项，直接读写 `auth`/`disguise`/`pet` store。改设置项 UI 时改这里而不是 App.vue。
 - `src/composables/useMouseAutoHide.ts`：鼠标离开主窗+所有子窗 N 秒后整体变淡。**不能靠 DOM mouseleave/enter**——子窗是独立 OS 窗口，鼠标进子窗对主窗 DOM 是 mouseleave。实现走 `get_cursor_position` + 每个 `web-tab-bounds` 的全局矩形命中。
 - `src/services/auth.ts`：鉴权 mock 层。M4 伪装 / M5 工作监测 / M8 桌宠是 VIP 功能，统一 `authStore.canUse(feature)` 门控。真实后端接入时**只替换本文件**，保持导出接口不变，store 与组件不动。
 

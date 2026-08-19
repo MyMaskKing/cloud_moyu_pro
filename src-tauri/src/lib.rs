@@ -29,6 +29,147 @@ static CURRENT_TRANSPARENCY_KEY: Mutex<Option<Shortcut>> = Mutex::new(None);
 /// 记录所有已开启的 web tab label,用于老板键批量隐藏/恢复
 static WEB_TABS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+// ────── 用户脚本(迷你油猴) ──────
+//
+// 前端把用户在设置里粘贴的 .user.js 解析为元数据后下发到这里缓存;
+// open_web_tab 创建子窗时把启用的脚本拼进 initialization_script,
+// 在 document-start 注入一个轻量 runner,提供基础 GM_* API(GM_addStyle /
+// GM_setValue / GM_getValue 等,存储走子窗 localStorage),按 @match/@include/
+// @exclude 决定是否执行。不提供 GM_xmlhttpRequest / @require,不做网络请求。
+// 脚本与页面同源,权限等同页面自身脚本(ACL 不额外提权)。
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct UserScript {
+    id: String,
+    name: String,
+    code: String,
+    matches: Vec<String>,
+    includes: Vec<String>,
+    excludes: Vec<String>,
+    run_at: String,
+    enabled: bool,
+}
+
+/// 前端下发的启用脚本全集(仅 main 窗口调用,见 app-commands.toml)
+static USER_SCRIPTS: Mutex<Vec<UserScript>> = Mutex::new(Vec::new());
+
+#[tauri::command]
+fn set_user_scripts(scripts: Vec<UserScript>) -> Result<(), String> {
+    match USER_SCRIPTS.lock() {
+        Ok(mut g) => {
+            *g = scripts;
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 生成注入到每个 web-tab 子窗的用户脚本 runner 代码。
+/// 无启用脚本时返回空串,不注入任何东西。
+fn build_userscript_boot() -> String {
+    let scripts = match USER_SCRIPTS.lock() {
+        Ok(g) => g.iter().filter(|s| s.enabled).cloned().collect::<Vec<_>>(),
+        Err(_) => return String::new(),
+    };
+    if scripts.is_empty() {
+        return String::new();
+    }
+    let json = match serde_json::to_string(&scripts) {
+        Ok(j) => j,
+        Err(_) => return String::new(),
+    };
+    // 注意:JSON 已是合法 JS 字面量,直接内联。runner 自身用普通函数作用域隔离,
+    // 用户代码再经 new Function 包裹,顶层变量不污染页面全局。
+    format!(
+        r#"
+        (function(){{
+          var SCRIPTS = {json};
+          if (!SCRIPTS.length) return;
+          function escRe(s){{ return String(s).replace(/[.*+?^${{}}()|[\]\\]/g,'\\$&'); }}
+          // @match 语法:scheme://host/path,* 为通配;<all_urls> 匹配任意 http(s)
+          function patToRe(pat){{
+            if (pat === '<all_urls>') return /^https?:\/\/.+/;
+            var m = /^(\*|https?):\/\/([^/]+)(\/.*)?$/.exec(pat);
+            if (!m) return /(?!)/; // 非法规则永不匹配
+            var scheme = m[1]==='*' ? 'https?' : m[1];
+            var host = m[2], path = m[3] || '/';
+            var hostRe;
+            if (host === '*') hostRe = '[^/]+';
+            else if (host.charAt(0)==='*' && host.charAt(1)==='.')
+              hostRe = '(?:[^/]+\\.)?' + escRe(host.slice(2));
+            else hostRe = escRe(host);
+            var pathRe = escRe(path).replace(/\\\*/g,'.*');
+            return new RegExp('^' + scheme + '://' + hostRe + pathRe + '$');
+          }}
+          // @include 旧语法:含 * 当 glob 整串匹配,不含则按子串匹配
+          function incToRe(inc){{
+            if (inc.indexOf('*') >= 0)
+              return new RegExp('^' + escRe(inc).replace(/\\\*/g,'.*') + '$');
+            return {{ test: function(v){{ return v.indexOf(inc) >= 0; }} }};
+          }}
+          function matchLoc(s){{
+            var loc = location.href;
+            if (s.excludes.some(function(p){{ return patToRe(p).test(loc); }})) return false;
+            if (s.matches.length || s.includes.length)
+              return s.matches.some(function(p){{ return patToRe(p).test(loc); }})
+                  || s.includes.some(function(p){{ return incToRe(p).test(loc); }});
+            return false; // 无 include/match 规则 = 不注入(安全默认)
+          }}
+          function makeGm(s){{
+            var ns = '__moyu_gm_' + s.id + '_';
+            return {{
+              GM_info: {{ scriptHandler:'cloud-moyu', version:'1.0',
+                          script: {{ name:s.name, namespace:'moyu' }} }},
+              unsafeWindow: window,
+              GM_addStyle: function(css){{
+                var el = document.createElement('style');
+                el.textContent = css;
+                (document.head || document.documentElement).appendChild(el);
+                return el;
+              }},
+              GM_setValue: function(k,v){{
+                try {{ localStorage.setItem(ns+k, JSON.stringify(v)); }} catch(e) {{}}
+              }},
+              GM_getValue: function(k,d){{
+                try {{ var r = localStorage.getItem(ns+k);
+                       return r==null ? d : JSON.parse(r); }} catch(e) {{ return d; }}
+              }},
+              GM_deleteValue: function(k){{ try {{ localStorage.removeItem(ns+k); }} catch(e) {{}} }},
+              GM_listValues: function(){{
+                return Object.keys(localStorage).filter(function(x){{
+                  return x.indexOf(ns)===0;
+                }}).map(function(x){{ return x.slice(ns.length); }});
+              }}
+            }};
+          }}
+          function run(s){{
+            var g = makeGm(s);
+            try {{
+              (new Function('GM_info','GM_addStyle','GM_setValue','GM_getValue',
+                'GM_deleteValue','GM_listValues','unsafeWindow', s.code))
+                (g.GM_info, g.GM_addStyle, g.GM_setValue, g.GM_getValue,
+                 g.GM_deleteValue, g.GM_listValues, g.unsafeWindow);
+            }} catch(e) {{ console.warn('[userscript] ' + s.name + ':', e); }}
+          }}
+          var startNow = [], later = [];
+          SCRIPTS.forEach(function(s){{
+            if (!matchLoc(s)) return;
+            (s.runAt === 'document-start' ? startNow : later).push(s);
+          }});
+          startNow.forEach(run);
+          if (later.length) {{
+            function fire(){{ later.forEach(run); }}
+            if (document.readyState === 'loading')
+              document.addEventListener('DOMContentLoaded', fire, {{ once:true }});
+            else fire();
+          }}
+        }})();
+"#,
+        json = json
+    )
+}
+
 // ────── M5: 工作进程监测 ──────
 //
 // 轮询系统进程列表,匹配"工作类"应用(钉钉/腾讯会议/Zoom 等),
@@ -586,6 +727,8 @@ async fn open_web_tab(
         })();
     "#;
     let init_script = init_script_tpl.replace("__MUOYU_TAB_ID__", &id);
+    // 用户脚本 runner(无启用脚本时为空串),追加在应用自身注入之后
+    let init_script = init_script + &build_userscript_boot();
 
     let win = WebviewWindowBuilder::new(&app, &label, parsed)
         .parent(&main).map_err(|e| e.to_string())?
@@ -605,14 +748,17 @@ async fn open_web_tab(
     let label_for_event = label.clone();
     win.on_window_event(move |ev| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
-            // 判断当前是否 popout 状态:decorations 为 true = popout
-            // 简化:直接询问 label 有没有 decoration —— 无法直接查,退而求其次:
-            // 广播 close-requested 事件给主窗口,由主窗口决定"切回 inline"还是"真关"
-            api.prevent_close();
-            let _ = app_for_event.emit(
-                "web-tab-close-requested",
-                serde_json::json!({ "id": id_for_event.clone(), "label": label_for_event.clone() }),
-            );
+            // 主窗在:拦截系统 ✕,交给主窗前端决定"切回 inline"还是"真关"。
+            // 主窗已关闭(孤儿独立窗):放行原生关闭,否则 prevent 后事件无人接收,窗口永远关不掉。
+            if app_for_event.get_webview_window("main").is_some() {
+                api.prevent_close();
+                let _ = app_for_event.emit(
+                    "web-tab-close-requested",
+                    serde_json::json!({ "id": id_for_event.clone(), "label": label_for_event.clone() }),
+                );
+            } else {
+                forget_tab(&label_for_event);
+            }
         }
     });
 
@@ -649,19 +795,24 @@ async fn close_web_tab(app: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 兜底:关掉所有 web-tab 子窗口(用于"最后一个标签关闭后清空幽灵画面")
-#[tauri::command]
-async fn close_all_web_tabs(app: AppHandle) -> Result<(), String> {
+/// 销毁所有 web-tab 子窗口(destroy 绕过 CloseRequested 拦截)。
+/// 主窗关闭时用它级联清理,否则 popout 等独立子窗会成为孤儿留在桌面上。
+fn destroy_all_web_tabs(app: &AppHandle) {
     let labels = WEB_TABS.lock().map(|g| g.clone()).unwrap_or_default();
     for l in labels {
         if let Some(win) = app.get_webview_window(&l) {
-            // 同上:必须 destroy 才能真正关掉,close 会被拦截
             let _ = win.destroy();
         }
     }
     if let Ok(mut g) = WEB_TABS.lock() {
         g.clear();
     }
+}
+
+/// 兜底:关掉所有 web-tab 子窗口(用于"最后一个标签关闭后清空幽灵画面")
+#[tauri::command]
+async fn close_all_web_tabs(app: AppHandle) -> Result<(), String> {
+    destroy_all_web_tabs(&app);
     Ok(())
 }
 
@@ -1245,10 +1396,18 @@ async fn popout_window_action(app: AppHandle, id: String, action: String) -> Res
         match action.as_str() {
             "minimize" => { win.minimize().map_err(|e| e.to_string())?; }
             "close" => {
-                let _ = app.emit(
-                    "web-tab-close-requested",
-                    serde_json::json!({ "id": id.clone(), "label": tab_label(&id) }),
-                );
+                // 正常情况:把"收回摸鱼窗口"交给主窗前端处理(它会 restoreInline)。
+                // 若主窗已关闭(孤儿独立窗),前端监听器不存在,emit 会落空导致 ✕ 无反应,
+                // 此时直接销毁自身。
+                if app.get_webview_window("main").is_some() {
+                    let _ = app.emit(
+                        "web-tab-close-requested",
+                        serde_json::json!({ "id": id.clone(), "label": tab_label(&id) }),
+                    );
+                } else if let Some(win) = app.get_webview_window(&tab_label(&id)) {
+                    let _ = win.destroy();
+                    forget_tab(&tab_label(&id));
+                }
             }
             _ => {}
         }
@@ -1654,9 +1813,22 @@ pub fn run() {
             set_pet_typing,
             is_pet_mode,
             pet_say,
+            set_user_scripts,
         ])
         .setup(move |app| {
             if let Some(win) = app.get_webview_window("main") {
+                // 主窗关闭 → 级联销毁所有子窗。
+                // popout 等通过 owner 挂靠主窗,但 Windows 不会随 owner 关闭自动关闭 owned 窗口,
+                // 不主动 destroy 会留下孤儿独立窗(且此时它的自绘 ✕ 因主窗已死、事件无人接收而失灵)。
+                let app_for_close = app.handle().clone();
+                win.on_window_event(move |ev| {
+                    if let tauri::WindowEvent::CloseRequested { .. } = ev {
+                        destroy_all_web_tabs(&app_for_close);
+                        if let Some(pet) = app_for_close.get_webview_window(PET_LABEL) {
+                            let _ = pet.destroy();
+                        }
+                    }
+                });
                 let _ = win.show();
                 let _ = win.set_focus();
             }

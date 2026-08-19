@@ -6,11 +6,37 @@ import { useDisguiseStore } from "../stores/disguise";
 import type { DisguiseSkin } from "../stores/disguise";
 import { usePetStore, PET_MIN, PET_MAX, DEFAULT_PET_LINES } from "../stores/pet";
 import type { PetKind } from "../stores/pet";
+import { useUserScriptsStore } from "../stores/userscripts";
 import VipLock from "../components/VipLock.vue";
 
 const auth = useAuthStore();
 const disguise = useDisguiseStore();
 const pet = usePetStore();
+const userScripts = useUserScriptsStore();
+
+// ────── 用户脚本(迷你油猴) ──────
+const scriptDraft = ref("");
+const scriptError = ref("");
+function addScript() {
+  scriptError.value = "";
+  const src = scriptDraft.value.trim();
+  if (!src) return;
+  const res = userScripts.addFromSource(src);
+  if (!res.ok) {
+    scriptError.value = res.error;
+    return;
+  }
+  scriptDraft.value = "";
+}
+function removeScript(id: string) {
+  userScripts.remove(id);
+}
+function moveScript(id: string, dir: -1 | 1) {
+  userScripts.move(id, dir);
+}
+function toggleScript(id: string, on: boolean) {
+  userScripts.setEnabled(id, on);
+}
 
 // ────── M4 皮肤选择 ──────
 // 行为按皮肤自动决定:vscode = 换壳式(真实网页可继续浏览);excel/ppt = 全屏遮蔽
@@ -751,6 +777,52 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
           </VipLock>
         </div>
       </div>
+
+      <!-- 用户脚本(迷你油猴) -->
+      <div class="group">
+        <div class="group-title">🛠 用户脚本（去广告）</div>
+        <div class="group-desc">
+          粘贴油猴 / Tampermonkey 的 <code>.user.js</code> 源码后添加。支持
+          <code>@name</code>、<code>@match</code>、<code>@include</code>、
+          <code>@exclude</code>、<code>@run-at</code>，以及
+          <code>GM_addStyle / GM_setValue / GM_getValue</code> 等基础接口。
+          脚本在标签页创建时注入，<b>新增或修改后需关闭并重新打开标签页生效</b>。
+        </div>
+        <div class="group-content">
+          <div class="row" style="align-items:flex-start">
+            <span class="label" style="padding-top:5px">已装脚本</span>
+            <div v-if="userScripts.scripts.length" class="us-list">
+              <div v-for="(s, i) in userScripts.scripts" :key="s.id" class="us-item">
+                <label class="us-check">
+                  <input type="checkbox" :checked="s.enabled" @change="toggleScript(s.id, ($event.target as HTMLInputElement).checked)" />
+                  <span class="us-name">{{ s.name }}</span>
+                </label>
+                <span class="us-meta">{{ s.matches[0] || s.includes[0] }}{{ (s.matches.length + s.includes.length) > 1 ? ' 等' : '' }}</span>
+                <button class="btn us-order" :disabled="i === 0" @click="moveScript(s.id, -1)" title="上移（先注入）">▲</button>
+                <button class="btn us-order" :disabled="i === userScripts.scripts.length - 1" @click="moveScript(s.id, 1)" title="下移（后注入）">▼</button>
+                <button class="btn us-del" @click="removeScript(s.id)">删除</button>
+              </div>
+            </div>
+            <span v-else class="hint">还没有脚本。</span>
+          </div>
+          <div class="row" style="align-items:flex-start">
+            <span class="label" style="padding-top:5px">添加脚本</span>
+            <div style="display:flex;flex-direction:column;gap:6px;flex:1">
+              <textarea
+                v-model="scriptDraft"
+                class="us-input"
+                rows="6"
+                spellcheck="false"
+                placeholder="// ==UserScript==&#10;// @name        示例去广告&#10;// @match       https://example.com/*&#10;// ==/UserScript==&#10;GM_addStyle('.ad { display:none !important; }');"
+              ></textarea>
+              <div style="display:flex;align-items:center;gap:8px">
+                <button class="btn primary" :disabled="!scriptDraft.trim()" @click="addScript">＋ 添加</button>
+                <span v-if="scriptError" class="hint error">{{ scriptError }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -1039,4 +1111,58 @@ code {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* 用户脚本 */
+.group-desc code {
+  background: rgba(110, 118, 129, 0.28);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.us-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+.us-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgba(110, 118, 129, 0.14);
+  border-radius: 6px;
+}
+.us-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.us-check input { accent-color: #58a6ff; }
+.us-name { font-size: 12px; color: #c9d1d9; }
+.us-meta {
+  flex: 1;
+  font-size: 11px;
+  color: #8b949e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.us-del { padding: 2px 8px; font-size: 11px; }
+.us-order { padding: 2px 6px; font-size: 10px; line-height: 1; }
+.us-order:disabled { opacity: 0.3; cursor: default; }
+.us-input {
+  width: 100%;
+  resize: vertical;
+  background: rgba(13, 17, 23, 0.6);
+  color: #c9d1d9;
+  border: 1px solid rgba(110, 118, 129, 0.4);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  line-height: 1.5;
+}
+.us-input:focus { outline: none; border-color: #58a6ff; }
 </style>

@@ -42,20 +42,28 @@ import corgi05 from "../images/焦糖柯基05.png";
  * 顶部那段留白专门给气泡用 —— 窗口只有本体大时气泡会被窗口边界裁掉。
  *
  * 互动:
- *   - 左键按住拖动 → startDragging,放到哪停在哪(不自动归位)
- *   - 单击 → 轮流播放 跳跃 / 压扁回弹 / 左右抖动,并随机说一句
+ *   - 左键按住拖动 → startDragging,放到哪停在哪(不自动归位);松手有小回弹
+ *   - 单击 → 加权随机抽取一段连贯动作或单步动作,并随机说一句
  *   - 双击 → 退出桌宠、恢复摸鱼窗口
  *   - 右键 → 独立菜单窗口:调整大小 / 置顶开关 / 退出
  *   - 滚轮 → 连续缩放(底边中点为锚点,由 Rust 侧完成)
- *   - 鼠标移动 → 仅视线跟随,绝不移动窗口
+ *   - 鼠标移动 → 仅视线跟随,绝不移动窗口;靠近时所有角色都会欢迎晃动,离开会张望
  *   - 打字反应 → 主进程 pet-typing 驱动(仅 Windows,只知道"有没有在打字")
+ *
+ * 动画分层(优先级从高到低,后者在前者空闲时才接管):
+ *   1. action     瞬时连贯动作 (jump/squash/shake/dance/stretch/spin/walk/land)
+ *   2. idleFx     待机微动作   (blink/ear-twitch/look-around/weight-shift/yawn/sneeze/tail-wag)
+ *   3. mood       持续态       (idle 呼吸 / sleep 慢呼吸 / typing 点头打字)
+ *   4. near       角色特有待机晃动(垂耳猫歪头等)
  */
 
 type PetKind = "lopcat" | "psyduck" | "hamster" | "corgi";
 /** 持续态 */
 type Mood = "idle" | "sleep" | "typing";
 /** 瞬时与连贯动作 */
-type PetAction = "" | "jump" | "squash" | "shake" | "dance" | "stretch" | "spin" | "walk";
+type PetAction = "" | "jump" | "squash" | "shake" | "dance" | "stretch" | "spin" | "walk" | "land";
+/** 待机微动作(空闲时随机抽取,持续 0.2–1.6s 后自动清空) */
+type IdleFx = "" | "blink" | "ear-twitch" | "look-around" | "weight-shift" | "yawn" | "sneeze" | "tail-wag";
 type Facing = "left" | "right";
 
 const win = getCurrentWindow();
@@ -85,14 +93,14 @@ const lines: string[] = (() => {
 
 const mood = ref<Mood>("idle");
 const action = ref<PetAction>("");
+const idleFx = ref<IdleFx>("");
 const facing = ref<Facing>("right");
 const bubble = ref("");
 const isDragging = ref(false);
-/** 鼠标靠近时为 true:垂耳猫会歪头,其它角色用来放大眨眼等反应 */
+/** 按下但尚未判定为拖动:轻微拉伸,营造"被抓起"的物理感 */
+const isGrabbing = ref(false);
+/** 鼠标靠近时为 true:垂耳猫会歪头,其它角色用来欢迎晃动与眨眼放大反应 */
 const near = ref(false);
-
-
-let clickIdx = 0;
 
 const PET_IMAGES: Record<PetKind, { main: string; exprs: string[] }> = {
   lopcat: {
@@ -114,9 +122,6 @@ const PET_IMAGES: Record<PetKind, { main: string; exprs: string[] }> = {
 };
 
 const activeExprIdx = ref<number>(-1);
-const randomIdleExprIdx = ref<number>(-1);
-let idleExprTimer: number | undefined;
-let comboTimer: number | undefined;
 
 interface MotionStep {
   action?: PetAction;
@@ -126,38 +131,92 @@ interface MotionStep {
   durationMs: number;
 }
 
-/** 连贯组合动作序列库 */
+/** 连贯组合动作序列库 —— 每步直接切换到下一个动作,不在中间清空 action,
+ *  避免呼吸动画重启导致的"一帧弹回"生硬感。 */
 const ACTION_COMBOS: Record<string, MotionStep[]> = {
   // 连贯套路 1: 萌宠三段欢快跳舞 (蓄力下蹲 -> 高空跳跃 -> 落地摇晃 -> 歪头卖萌)
   joy_dance: [
     { action: "squash", exprIdx: 2, durationMs: 320 },
-    { action: "jump", exprIdx: 0, facing: "right", durationMs: 550 },
-    { action: "shake", exprIdx: 3, facing: "left", durationMs: 480 },
-    { action: "stretch", exprIdx: 1, sayText: "哼哼~ 看我给你表演个元气跳舞！", durationMs: 900 }
+    { action: "jump", exprIdx: 0, facing: "right", durationMs: 860 },
+    { action: "shake", exprIdx: 3, facing: "left", durationMs: 520 },
+    { action: "stretch", exprIdx: 1, sayText: "哼哼~ 看我给你表演个元气跳舞！", durationMs: 900 },
   ],
   // 连贯套路 2: 好奇巡逻 (左右观察 -> 原地小跳调头 -> 凑近镜头 -> 调皮摇摆)
   curious_patrol: [
-    { facing: "left", exprIdx: 1, durationMs: 380 },
-    { action: "jump", facing: "right", exprIdx: 0, durationMs: 480 },
+    { action: "stretch", facing: "left", exprIdx: 1, durationMs: 480 },
+    { action: "jump", facing: "right", exprIdx: 0, durationMs: 860 },
     { action: "squash", exprIdx: 2, durationMs: 420 },
-    { action: "shake", exprIdx: 3, sayText: "主人主人，发现你在偷偷摸鱼哦！", durationMs: 850 }
+    { action: "shake", exprIdx: 3, sayText: "主人主人,发现你在偷偷摸鱼哦！", durationMs: 720 },
   ],
   // 连贯套路 3: 慵懒伸展 (哈欠拉伸 -> 活力弹跳 -> 伸展摇晃)
   lazy_stretch: [
-    { action: "stretch", exprIdx: 4, durationMs: 550 },
-    { action: "jump", exprIdx: 0, durationMs: 580 },
-    { action: "shake", exprIdx: 3, sayText: "伸个懒腰，摸鱼效率直接翻倍~", durationMs: 800 }
+    { action: "stretch", exprIdx: 4, durationMs: 700 },
+    { action: "jump", exprIdx: 0, durationMs: 860 },
+    { action: "shake", exprIdx: 3, sayText: "伸个懒腰,摸鱼效率直接翻倍~", durationMs: 720 },
   ],
-  // 连贯套路 4: 踱步步态 (连贯迈步 -> 抖动 -> 调头)
+  // 连贯套路 4: 转圈秀 (蓄力 -> 旋风转一圈 -> 落地摇晃回正)
+  spin_show: [
+    { action: "squash", exprIdx: 2, durationMs: 280 },
+    { action: "spin", exprIdx: 0, sayText: "转一圈给你看~", durationMs: 900 },
+    { action: "shake", exprIdx: 3, durationMs: 420 },
+  ],
+  // 连贯套路 5: 踱步步态 (连贯迈步 -> 抖动 -> 调头)
   wander_walk: [
-    { action: "walk", facing: "left", exprIdx: 1, durationMs: 450 },
-    { action: "shake", facing: "left", exprIdx: 3, durationMs: 400 },
-    { action: "walk", facing: "right", exprIdx: 0, durationMs: 450 },
-    { action: "", exprIdx: -1, durationMs: 300 }
-  ]
+    { action: "walk", facing: "left", exprIdx: 1, durationMs: 480 },
+    { action: "shake", facing: "left", exprIdx: 3, durationMs: 420 },
+    { action: "walk", facing: "right", exprIdx: 0, durationMs: 480 },
+    { action: "stretch", exprIdx: -1, durationMs: 320 },
+  ],
 };
 
-const COMBO_KEYS = ["joy_dance", "curious_patrol", "lazy_stretch"];
+/** 点击触发的动作池(加权随机抽取,不再循环固定套路,每次都不一样) */
+interface ClickActionDef {
+  comboKey?: string;
+  action?: PetAction;
+  exprIdx?: number;
+  sayText?: string;
+  durationMs: number;
+  weight: number;
+}
+const CLICK_ACTIONS: ClickActionDef[] = [
+  { comboKey: "joy_dance", weight: 12, durationMs: 0 },
+  { comboKey: "curious_patrol", weight: 10, durationMs: 0 },
+  { comboKey: "lazy_stretch", weight: 9, durationMs: 0 },
+  { comboKey: "spin_show", weight: 9, durationMs: 0 },
+  { comboKey: "wander_walk", weight: 5, durationMs: 0 },
+  { action: "jump", exprIdx: 0, durationMs: 860, sayText: "嘿!", weight: 16 },
+  { action: "spin", exprIdx: 0, durationMs: 900, sayText: "哒哒哒~", weight: 8 },
+  { action: "shake", exprIdx: 3, durationMs: 520, weight: 6 },
+  { action: "stretch", exprIdx: 4, durationMs: 700, sayText: "嗯——", weight: 6 },
+];
+
+// ── 待机微动作池(空闲时加权随机抽取,持续时长后自动清空) ──
+interface IdleFxDef {
+  name: IdleFx;
+  weight: number;
+  durationMs: number;
+  /** 触发该微动作时锁定的表情帧(可选) */
+  exprIdx?: number;
+}
+const IDLE_FX_POOL: IdleFxDef[] = [
+  { name: "blink",        weight: 30, durationMs: 180 },
+  { name: "ear-twitch",   weight: 18, durationMs: 320 },
+  { name: "look-around",  weight: 14, durationMs: 1600 },
+  { name: "weight-shift",  weight: 13, durationMs: 1400 },
+  { name: "tail-wag",     weight: 10, durationMs: 900 },
+  { name: "yawn",         weight: 8,  durationMs: 1200, exprIdx: 4 },
+  { name: "sneeze",       weight: 7,  durationMs: 620,  exprIdx: 3 },
+];
+
+function weightedPick<T extends { weight: number }>(arr: T[]): T {
+  const total = arr.reduce((s, x) => s + x.weight, 0);
+  let r = Math.random() * total;
+  for (const x of arr) {
+    r -= x.weight;
+    if (r <= 0) return x;
+  }
+  return arr[arr.length - 1];
+}
 
 // ── 图片双层渐变切换系统 ──
 function getTargetSrc(): string {
@@ -165,15 +224,17 @@ function getTargetSrc(): string {
   if (mood.value === "sleep") return data.exprs[4] || data.main;
   if (mood.value === "typing") return data.exprs[1] || data.main;
   if (isDragging.value) return data.exprs[2] || data.main;
+  if (isGrabbing.value) return data.exprs[2] || data.main;
   if (action.value === "jump") return data.exprs[0] || data.main;
   if (action.value === "squash") return data.exprs[2] || data.main;
   if (action.value === "shake") return data.exprs[3] || data.main;
   if (action.value === "dance") return data.exprs[0] || data.main;
   if (action.value === "stretch") return data.exprs[1] || data.main;
   if (action.value === "walk") return data.exprs[0] || data.main;
+  if (action.value === "spin") return data.exprs[0] || data.main;
+  if (action.value === "land") return data.exprs[2] || data.main;
   if (activeExprIdx.value >= 0 && data.exprs[activeExprIdx.value]) return data.exprs[activeExprIdx.value];
   if (near.value && data.exprs[0]) return data.exprs[0];
-  if (randomIdleExprIdx.value >= 0 && data.exprs[randomIdleExprIdx.value]) return data.exprs[randomIdleExprIdx.value];
   return data.main;
 }
 
@@ -194,14 +255,32 @@ function switchTo(newSrc: string) {
   }
 }
 
-watch([mood, action, isDragging, activeExprIdx, randomIdleExprIdx, near], () => {
+watch([mood, action, idleFx, isDragging, isGrabbing, activeExprIdx, near], () => {
   switchTo(getTargetSrc());
+});
+
+// 鼠标靠近/离开的瞬时反应:所有角色都给个欢迎/张望微动作
+watch(near, (v, old) => {
+  if (v === old) return;
+  if (mood.value !== "idle" || action.value || isDragging.value) return;
+  if (v) {
+    // 鼠标刚靠近 → 短暂摇尾欢迎
+    playIdleFxByName("tail-wag", 900);
+  } else if (old) {
+    // 鼠标刚离开 → 张望一下
+    playIdleFxByName("look-around", 1600);
+  }
 });
 
 let bubbleTimer: number | undefined;
 let actionTimer: number | undefined;
+let comboTimer: number | undefined;
 let wanderTimer: number | undefined;
 let idleTimer: number | undefined;
+let idleFxTimer: number | undefined;
+/** 待机微动作调度器的自延时器(与 idleFxTimer 是两个独立计时:
+ *  idleFxTimer 控制某个微动作播放多久后清空;idleSchedulerTimer 控制下一次抽取微动作的间隔) */
+let idleSchedulerTimer: number | undefined;
 let imgSwitchTimer: number | undefined;
 /** 拖动判定:按下位置,位移超过阈值才算拖动而非点击 */
 let downAt: { x: number; y: number } | null = null;
@@ -221,7 +300,6 @@ const stageStyle = computed(() => ({
 }));
 
 
-
 /** 气泡单条上限:留白区约能排四行,超长的自定义台词截断而非硬裁一半 */
 const BUBBLE_MAX_CHARS = 26;
 
@@ -233,16 +311,21 @@ function say(text: string, ms = 2600) {
   bubbleTimer = window.setTimeout(() => { bubble.value = ""; }, ms);
 }
 
-/** 播放连贯组合动作序列 */
+/** 播放连贯组合动作序列 —— 每步用"先清空再 rAF 设置"保证 CSS 动画从头播;
+ *  呼吸动画在两帧之间的 0% 关键帧也是 identity,不会产生肉眼可见的弹回 */
 function playComboSequence(steps: MotionStep[]) {
   if (comboTimer) window.clearTimeout(comboTimer);
   if (actionTimer) window.clearTimeout(actionTimer);
   if (imgSwitchTimer) window.clearTimeout(imgSwitchTimer);
+  // 切换前先清掉微动作,避免和连贯动作的 transform 打架
+  idleFx.value = "";
+  if (idleFxTimer) { window.clearTimeout(idleFxTimer); idleFxTimer = undefined; }
 
   let stepIdx = 0;
 
   function runNextStep() {
     if (stepIdx >= steps.length) {
+      // 序列结束:动作清空时配合 .pet-body 的 transform 过渡平滑回到 idle
       action.value = "";
       imgSwitchTimer = window.setTimeout(() => {
         activeExprIdx.value = -1;
@@ -271,6 +354,8 @@ function playAction(a: Exclude<PetAction, "">) {
   if (comboTimer) window.clearTimeout(comboTimer);
   if (actionTimer) window.clearTimeout(actionTimer);
   if (imgSwitchTimer) window.clearTimeout(imgSwitchTimer);
+  idleFx.value = "";
+  if (idleFxTimer) { window.clearTimeout(idleFxTimer); idleFxTimer = undefined; }
   action.value = "";
   window.requestAnimationFrame(() => {
     action.value = a;
@@ -279,9 +364,21 @@ function playAction(a: Exclude<PetAction, "">) {
       imgSwitchTimer = window.setTimeout(() => {
         activeExprIdx.value = -1;
       }, 280);
-    }, 600);
+    }, ACTION_DURATION_MS[a] ?? 600);
   });
 }
+
+/** 各动作的播放时长(与 CSS keyframe 时长对齐) */
+const ACTION_DURATION_MS: Record<Exclude<PetAction, "">, number> = {
+  jump: 850,
+  squash: 520,
+  shake: 520,
+  dance: 720,
+  stretch: 700,
+  spin: 900,
+  walk: 500,
+  land: 360,
+};
 
 /** 空闲久了打瞌睡;任何互动都会重置 */
 function resetIdle() {
@@ -290,12 +387,51 @@ function resetIdle() {
   idleTimer = window.setTimeout(() => {
     if (mood.value === "idle") mood.value = "sleep";
   }, 45000);
+  scheduleIdleFx();
+}
+
+/** 待机微动作调度:加权随机抽一个微动作,2.5–7s 后再来一次。
+ *  任何互动(resetIdle)都会重置此调度,保证交互中不会插一个微动作进来。 */
+function scheduleIdleFx() {
+  if (idleSchedulerTimer) window.clearTimeout(idleSchedulerTimer);
+  const delay = 2500 + Math.random() * 4500;
+  idleSchedulerTimer = window.setTimeout(() => {
+    idleSchedulerTimer = undefined;
+    // 只在真正空闲时才触发,且不和当前进行中的动作冲突
+    if (mood.value === "idle" && !action.value && !isDragging.value && !isGrabbing.value && !idleFx.value) {
+      const def = weightedPick(IDLE_FX_POOL);
+      playIdleFxByName(def.name, def.durationMs, def.exprIdx);
+    }
+    scheduleIdleFx();
+  }, delay);
+}
+
+/** 按名字播放一个待机微动作;持续 durationMs 后自动清空 */
+function playIdleFxByName(name: IdleFx, durationMs: number, exprIdx?: number) {
+  // 微动作和连贯 action / 拖拽态互斥:有动作或被指尖捏住时不清空原状态
+  if (action.value || isDragging.value || isGrabbing.value) return;
+  if (idleFxTimer) { window.clearTimeout(idleFxTimer); idleFxTimer = undefined; }
+  if (exprIdx !== undefined) activeExprIdx.value = exprIdx;
+  idleFx.value = name;
+  idleFxTimer = window.setTimeout(() => {
+    idleFx.value = "";
+    idleFxTimer = undefined;
+    if (exprIdx !== undefined) {
+      if (imgSwitchTimer) window.clearTimeout(imgSwitchTimer);
+      imgSwitchTimer = window.setTimeout(() => { activeExprIdx.value = -1; }, 200);
+    }
+  }, durationMs);
 }
 
 function onPointerDown(e: PointerEvent) {
   if (e.button !== 0) return;
   downAt = { x: e.screenX, y: e.screenY };
   isDragging.value = false;
+  // 按下即轻微拉伸,营造"被指尖捏住"的物理感
+  isGrabbing.value = true;
+  // 清掉进行中的微动作:is-grab 的 CSS 优先级低于 idle-*,不主动清会被覆盖
+  idleFx.value = "";
+  if (idleFxTimer) { window.clearTimeout(idleFxTimer); idleFxTimer = undefined; }
   resetIdle();
 }
 
@@ -306,32 +442,47 @@ function onPointerMove(e: PointerEvent) {
     Math.abs(e.screenY - downAt.y) > DRAG_THRESHOLD;
   if (moved) {
     isDragging.value = true;
+    isGrabbing.value = false;
     // 交给系统拖动:此后本 webview 不再收到 move/up,收尾在 pointercancel/blur
     win.startDragging().catch(() => {});
   }
 }
 
-/** 拖动结束:位置保持用户松手处,不做任何自动归位 */
+/** 拖动结束:位置保持用户松手处,不做任何自动归位;松手播一段小回弹而非完整跳 */
 function endDrag() {
   if (isDragging.value) {
     isDragging.value = false;
+    isGrabbing.value = false;
     downAt = null;
-    playAction("jump");
+    // 用 land(短促挤压回弹)替代原来的 jump,更贴合"刚被放下"的物理感
+    if (comboTimer) window.clearTimeout(comboTimer);
+    if (actionTimer) window.clearTimeout(actionTimer);
+    action.value = "";
+    window.requestAnimationFrame(() => {
+      action.value = "land";
+      actionTimer = window.setTimeout(() => {
+        action.value = "";
+      }, ACTION_DURATION_MS.land);
+    });
     return;
   }
+  isGrabbing.value = false;
   downAt = null;
 }
 
 function onClick() {
   if (isDragging.value) return;
   resetIdle();
-  const comboKey = COMBO_KEYS[clickIdx % COMBO_KEYS.length];
-  clickIdx++;
-  const steps = ACTION_COMBOS[comboKey];
-  if (steps) {
-    playComboSequence(steps);
-  } else {
-    playAction("jump");
+  // 加权随机抽一个动作
+  const def = weightedPick(CLICK_ACTIONS);
+  if (def.comboKey) {
+    const steps = ACTION_COMBOS[def.comboKey];
+    if (steps) playComboSequence(steps);
+  } else if (def.action) {
+    const a = def.action;
+    if (def.exprIdx !== undefined) activeExprIdx.value = def.exprIdx;
+    if (def.sayText) say(def.sayText);
+    playAction(a);
   }
   if (lines.length && Math.random() > 0.4) {
     say(lines[Math.floor(Math.random() * lines.length)]);
@@ -446,21 +597,9 @@ async function applyEyeTrack(cx: number, cy: number) {
   }
 }
 
-function startIdleExprLoop() {
-  idleExprTimer = window.setInterval(() => {
-    if (mood.value === "idle" && !near.value && !action.value && !isDragging.value) {
-      randomIdleExprIdx.value = Math.floor(Math.random() * 4);
-      setTimeout(() => {
-        randomIdleExprIdx.value = -1;
-      }, 2200);
-    }
-  }, 8500);
-}
-
 onMounted(async () => {
   resetIdle();
   wanderTimer = window.setInterval(tickWander, 6000);
-  startIdleExprLoop();
 
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", endDrag);
@@ -512,7 +651,8 @@ onBeforeUnmount(() => {
   if (idleTimer) window.clearTimeout(idleTimer);
   if (wanderTimer) window.clearInterval(wanderTimer);
   if (imgSwitchTimer) window.clearTimeout(imgSwitchTimer);
-  if (idleExprTimer) window.clearInterval(idleExprTimer);
+  if (idleFxTimer) window.clearTimeout(idleFxTimer);
+  if (idleSchedulerTimer) window.clearTimeout(idleSchedulerTimer);
   if (comboTimer) window.clearTimeout(comboTimer);
   unlistens.forEach((u) => u());
 });
@@ -523,7 +663,8 @@ onBeforeUnmount(() => {
     class="pet-root"
     :style="rootStyle"
     :class="[`m-${mood}`, `f-${facing}`, `k-${kind}`,
-      action && `a-${action}`, { 'is-drag': isDragging, 'is-near': near }]"
+      action && `a-${action}`, idleFx && `idle-${idleFx}`,
+      { 'is-drag': isDragging, 'is-grab': isGrabbing, 'is-near': near }]"
     @pointerdown="onPointerDown"
     @click="onClick"
     @dblclick="onDblClick"
@@ -547,6 +688,14 @@ onBeforeUnmount(() => {
         <div v-if="mood === 'sleep'" class="zzz-box">
           <span class="zzz">z</span>
           <span class="zzz z2">z</span>
+        </div>
+
+        <!-- 打喷嚏时的粉尘小颗粒(由 idle-sneeze 触发) -->
+        <div v-if="idleFx === 'sneeze'" class="sneeze-puff">
+          <span class="puff p1"></span>
+          <span class="puff p2"></span>
+          <span class="puff p3"></span>
+          <span class="puff p4"></span>
         </div>
 
         <!-- ══════ 打字特效:键盘 + 交替拍打的爪子(所有宠物共用) ══════ -->
@@ -615,6 +764,18 @@ html, body, #app {
   transform-origin: 50% 92%;
   animation: breathe 3s ease-in-out infinite;
   will-change: transform;
+  /* 动作结束时(action class 移除)transform 通过此过渡平滑回 idle,
+     避免动作结束瞬间"啪"一下弹回原位的生硬感 */
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* 任何 action / idleFx / 拖拽态生效时禁用过渡:动画自身已定义起止,
+   transition 会和动画抢着改 transform,反而抖动 */
+.a-jump .pet-body, .a-squash .pet-body, .a-shake .pet-body, .a-dance .pet-body,
+.a-stretch .pet-body, .a-spin .pet-body, .a-walk .pet-body, .a-land .pet-body,
+.idle-blink .pet-body, .idle-ear-twitch .pet-body, .idle-look-around .pet-body,
+.idle-weight-shift .pet-body, .idle-yawn .pet-body, .idle-sneeze .pet-body,
+.idle-tail-wag .pet-body, .is-grab .pet-body, .is-drag .pet-body {
+  transition: none;
 }
 
 /* ── 图片双层渐变切换系统 ── */
@@ -630,9 +791,9 @@ html, body, #app {
   height: 100%;
   object-fit: contain;
   opacity: 0;
-  transition: opacity 0.28s ease-in-out, transform 0.2s ease-out;
+  transition: opacity 0.28s ease-in-out, transform 0.2s ease-out, filter 0.18s ease-out;
   pointer-events: none;
-  will-change: opacity, transform;
+  will-change: opacity, transform, filter;
 }
 .pet-img.img-top { opacity: 1; }
 
@@ -649,6 +810,7 @@ html, body, #app {
   filter: blur(5px);
   pointer-events: none;
   animation: shadow-pulse 3s ease-in-out infinite;
+  transition: width 0.18s ease-out, opacity 0.18s ease-out;
 }
 @keyframes shadow-pulse {
   0%, 100% { transform: translateX(-50%) scaleX(1);    opacity: 0.16; }
@@ -692,7 +854,7 @@ html, body, #app {
   100% { opacity: 0;   transform: translate(5px, -18px) scale(1.1); }
 }
 
-/* ── 呼吸待机 ── */
+/* ── 呼吸待机(主基准,所有动作动画都通过覆盖 animation 来叠加) ── */
 @keyframes breathe {
   0%, 100% { transform: scaleY(1)     scaleX(1); }
   40%      { transform: scaleY(1.03)  scaleX(0.988); }
@@ -760,16 +922,50 @@ html, body, #app {
   50%      { transform: translateY(-4px) scaleY(0.98); }
 }
 
-/* ── 点击互动动作 ── */
-.a-jump .pet-body { animation: act-jump 0.62s cubic-bezier(0.3, 1.4, 0.5, 1); }
-@keyframes act-jump {
-  0%   { transform: translateY(0) scaleY(1); }
-  18%  { transform: translateY(3px) scaleY(0.88) scaleX(1.08); }
-  46%  { transform: translateY(-22px) scaleY(1.08) scaleX(0.94); }
-  74%  { transform: translateY(0) scaleY(0.94) scaleX(1.04); }
-  100% { transform: translateY(0) scaleY(1) scaleX(1); }
+/* ════════════════════════════════════════════════════════════════════
+   拖拽物理感:按下时轻微拉伸,模拟"被指尖捏住"
+   ════════════════════════════════════════════════════════════════════ */
+.is-grab .pet-body {
+  animation: grab-stretch 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+@keyframes grab-stretch {
+  0%   { transform: scaleY(1) scaleX(1); }
+  60%  { transform: scaleY(1.05) scaleX(0.95); }
+  100% { transform: scaleY(1.04) scaleX(0.96); }
+}
+.is-drag .pet-body {
+  animation: drag-wiggle 0.7s ease-in-out infinite;
+}
+@keyframes drag-wiggle {
+  0%, 100% { transform: scaleY(1.06) scaleX(0.94) rotate(-1.5deg); }
+  50%      { transform: scaleY(1.06) scaleX(0.94) rotate(1.5deg); }
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   点击连贯动作:每段都加了 预期(蓄力) → 主力 → 落地挤压 → 回弹恢复
+   ════════════════════════════════════════════════════════════════════ */
+
+/* 跳跃:预期下蹲 → 起跳 → 顶点 → 下落 → 落地挤压 → 回弹 → 收 */
+.a-jump .pet-body { animation: act-jump 0.85s cubic-bezier(0.3, 1.3, 0.5, 1); }
+@keyframes act-jump {
+  0%   { transform: translateY(0) scaleY(1) scaleX(1); }
+  12%  { transform: translateY(4px) scaleY(0.82) scaleX(1.14); }
+  25%  { transform: translateY(-8px) scaleY(1.06) scaleX(0.96); }
+  50%  { transform: translateY(-26px) scaleY(1.04) scaleX(0.97); }
+  70%  { transform: translateY(-2px) scaleY(0.86) scaleX(1.12); }
+  85%  { transform: translateY(0) scaleY(1.08) scaleX(0.95); }
+  100% { transform: translateY(0) scaleY(1) scaleX(1); }
+}
+/* 跳跃时阴影也跟着缩小再放大,增强空中悬浮感 */
+.a-jump .pet-shadow-el {
+  animation: shadow-jump 0.85s cubic-bezier(0.3, 1.3, 0.5, 1);
+}
+@keyframes shadow-jump {
+  0%, 100% { transform: translateX(-50%) scaleX(1);   opacity: 0.16; }
+  50%      { transform: translateX(-50%) scaleX(0.55); opacity: 0.07; }
+}
+
+/* 压扁:蓄力挤压 → 回弹震荡 → 收 */
 .a-squash .pet-body { animation: act-squash 0.52s cubic-bezier(0.25, 1.5, 0.4, 1); }
 @keyframes act-squash {
   0%   { transform: scaleY(1) scaleX(1); }
@@ -779,6 +975,7 @@ html, body, #app {
   100% { transform: scaleY(1) scaleX(1); }
 }
 
+/* 摇晃:左右摆动 + 收尾余震 */
 .a-shake .pet-body { animation: act-shake 0.52s ease-in-out; }
 @keyframes act-shake {
   0%, 100% { transform: rotate(0deg); }
@@ -788,6 +985,7 @@ html, body, #app {
   85%      { transform: rotate(3deg); }
 }
 
+/* 跳舞:三段上下 + 旋转混合 */
 .a-dance .pet-body { animation: act-dance 0.72s cubic-bezier(0.34, 1.56, 0.64, 1); }
 @keyframes act-dance {
   0%   { transform: translateY(0) rotate(0deg) scale(1); }
@@ -797,24 +995,148 @@ html, body, #app {
   100% { transform: translateY(0) rotate(0deg) scale(1); }
 }
 
-.a-stretch .pet-body { animation: act-stretch 0.6s cubic-bezier(0.25, 1.4, 0.5, 1); }
+/* 伸展:慢拉伸 → 顶点停顿 → 慢回弹 */
+.a-stretch .pet-body { animation: act-stretch 0.7s cubic-bezier(0.25, 1.4, 0.5, 1); }
 @keyframes act-stretch {
   0%   { transform: scaleY(1) scaleX(1); }
   35%  { transform: scaleY(1.18) scaleX(0.88) translateY(-6px); }
-  70%  { transform: scaleY(0.92) scaleX(1.06) translateY(2px); }
+  60%  { transform: scaleY(1.14) scaleX(0.9) translateY(-4px); }
   100% { transform: scaleY(1) scaleX(1); }
 }
 
-.a-walk .pet-body { animation: act-walk 0.45s ease-in-out; }
-@keyframes act-walk {
-  0%   { transform: translateY(0) rotate(0deg); }
-  30%  { transform: translateY(-6px) rotate(-4deg) scaleY(1.02); }
-  70%  { transform: translateY(-2px) rotate(3deg) scaleY(0.98); }
-  100% { transform: translateY(0) rotate(0deg); }
+/* 旋风:起跳同时原地旋转一圈,落地回正 */
+.a-spin .pet-body { animation: act-spin 0.9s cubic-bezier(0.4, 0.0, 0.2, 1); }
+@keyframes act-spin {
+  0%   { transform: rotate(0deg) translateY(0) scale(1); }
+  20%  { transform: rotate(-90deg) translateY(-6px) scale(0.97); }
+  50%  { transform: rotate(-180deg) translateY(-12px) scale(0.94); }
+  80%  { transform: rotate(-340deg) translateY(-4px) scale(0.97); }
+  100% { transform: rotate(-360deg) translateY(0) scale(1); }
 }
 
-/* ── 角色特有待机晃动 ── */
-.k-lopcat.is-near:not(.a-jump):not(.a-squash):not(.a-shake):not(.m-typing):not(.m-sleep) .pet-body {
+/* 走步:两段交替小跳,模拟左右脚交替踏地 */
+.a-walk .pet-body { animation: act-walk 0.5s ease-in-out; }
+@keyframes act-walk {
+  0%, 100% { transform: translateY(0) rotate(0deg) scaleY(1); }
+  25%      { transform: translateY(-6px) rotate(-4deg) scaleY(1.02); }
+  50%      { transform: translateY(0) rotate(0deg) scaleY(0.98); }
+  75%      { transform: translateY(-6px) rotate(3deg) scaleY(1.02); }
+}
+
+/* 松手回弹:短暂挤压 → 弹起 → 收,极短 */
+.a-land .pet-body { animation: act-land 0.36s cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes act-land {
+  0%   { transform: scaleY(0.9) scaleX(1.1); }
+  55%  { transform: scaleY(1.05) scaleX(0.96); }
+  100% { transform: scaleY(1) scaleX(1); }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   待机微动作:加权随机抽取,持续 0.18–1.6s 后自动清空,与 action 互斥
+   ════════════════════════════════════════════════════════════════════ */
+
+/* 眨眼:图片整体短暂压扁 + 轻微暗化,模拟眼皮闭合 */
+.idle-blink .pet-body { animation: idle-blink-body 0.18s ease-out; }
+.idle-blink .pet-img { animation: idle-blink-img 0.18s ease-out; }
+@keyframes idle-blink-body {
+  0%, 100% { transform: scaleY(1) scaleX(1); }
+  50%      { transform: scaleY(0.97) scaleX(1.01); }
+}
+@keyframes idle-blink-img {
+  0%, 100% { filter: brightness(1); }
+  50%      { filter: brightness(0.88); }
+}
+
+/* 抖耳:快速小幅旋转两次 */
+.idle-ear-twitch .pet-body { animation: idle-ear-twitch 0.32s ease-out; }
+@keyframes idle-ear-twitch {
+  0%, 100% { transform: rotate(0deg); }
+  30%      { transform: rotate(-5deg); }
+  55%      { transform: rotate(2deg); }
+  75%      { transform: rotate(-1deg); }
+}
+
+/* 张望:缓慢左右转头一圈,持续较长 */
+.idle-look-around .pet-body { animation: idle-look-around 1.6s ease-in-out; }
+@keyframes idle-look-around {
+  0%, 100% { transform: rotate(0deg); }
+  20%      { transform: rotate(-6deg); }
+  45%      { transform: rotate(0deg); }
+  70%      { transform: rotate(6deg); }
+  90%      { transform: rotate(0deg); }
+}
+
+/* 重心转移:缓慢向一侧倾斜 + 微移,像在换脚 */
+.idle-weight-shift .pet-body { animation: idle-weight-shift 1.4s ease-in-out; }
+@keyframes idle-weight-shift {
+  0%, 100% { transform: translateX(0) rotate(0deg); }
+  35%      { transform: translateX(3px) rotate(2deg); }
+  65%      { transform: translateX(3px) rotate(2deg); }
+}
+
+/* 摇尾/摇身:快速左右小幅摆动多次(对所有角色通用,柯基摇身=摇尾) */
+.idle-tail-wag .pet-body { animation: idle-tail-wag 0.9s ease-in-out; }
+@keyframes idle-tail-wag {
+  0%, 100% { transform: rotate(0deg); }
+  15%      { transform: rotate(-5deg); }
+  35%      { transform: rotate(5deg); }
+  55%      { transform: rotate(-4deg); }
+  75%      { transform: rotate(3deg); }
+  90%      { transform: rotate(-1deg); }
+}
+
+/* 打哈欠:缓慢大幅纵向拉伸 + 顶点停顿,像在张大嘴 */
+.idle-yawn .pet-body { animation: idle-yawn 1.2s ease-in-out; }
+@keyframes idle-yawn {
+  0%, 100% { transform: scaleY(1) scaleX(1) translateY(0); }
+  35%      { transform: scaleY(1.12) scaleX(0.9) translateY(-4px); }
+  60%      { transform: scaleY(1.1) scaleX(0.91) translateY(-3px); }
+}
+
+/* 打喷嚏:蓄力下蹲 → 抬头前冲 → 收;伴随粉尘颗粒 */
+.idle-sneeze .pet-body { animation: idle-sneeze 0.62s ease-out; }
+@keyframes idle-sneeze {
+  0%   { transform: translateY(0) scaleY(1); }
+  20%  { transform: translateY(3px) scaleY(0.92) scaleX(1.08); }
+  45%  { transform: translateY(-4px) scaleY(1.06) scaleX(0.94) rotate(-3deg); }
+  60%  { transform: translateY(-2px) scaleY(1.04) scaleX(0.96) rotate(2deg); }
+  80%  { transform: translateY(1px) scaleY(0.98) scaleX(1.02); }
+  100% { transform: translateY(0) scaleY(1) scaleX(1); }
+}
+.sneeze-puff {
+  position: absolute;
+  top: 18%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 6;
+}
+.sneeze-puff .puff {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.85), rgba(220, 220, 220, 0.0));
+  opacity: 0;
+  animation: puff-fly 0.62s ease-out;
+}
+.sneeze-puff .p1 { animation-delay: 0.18s; }
+.sneeze-puff .p2 { animation-delay: 0.22s; }
+.sneeze-puff .p3 { animation-delay: 0.26s; }
+.sneeze-puff .p4 { animation-delay: 0.30s; }
+@keyframes puff-fly {
+  0%   { opacity: 0; transform: translate(0, 0) scale(0.3); }
+  30%  { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(var(--dx, 14px), -14px) scale(1.6); }
+}
+.sneeze-puff .p1 { --dx: -14px; }
+.sneeze-puff .p2 { --dx: -5px; }
+.sneeze-puff .p3 { --dx: 8px; }
+.sneeze-puff .p4 { --dx: 16px; }
+
+/* ── 角色特有待机晃动(只在空闲且无微动作时接管) ── */
+.k-lopcat.is-near:not(.a-jump):not(.a-squash):not(.a-shake):not(.a-spin):not(.a-walk):not(.a-dance):not(.a-stretch):not(.a-land):not(.m-typing):not(.m-sleep):not([class*="idle-"]):not(.is-grab):not(.is-drag) .pet-body {
   animation: lop-tilt 1.8s ease-in-out infinite;
 }
 @keyframes lop-tilt {
@@ -822,7 +1144,7 @@ html, body, #app {
   50%      { transform: rotate(-5deg); }
 }
 
-.k-psyduck:not(.a-jump):not(.a-squash):not(.a-shake):not(.m-typing):not(.m-sleep) .pet-body {
+.k-psyduck:not(.a-jump):not(.a-squash):not(.a-shake):not(.a-spin):not(.a-walk):not(.a-dance):not(.a-stretch):not(.a-land):not(.m-typing):not(.m-sleep):not([class*="idle-"]):not(.is-grab):not(.is-drag) .pet-body {
   animation: duck-wobble 3s ease-in-out infinite; transform-origin: 50% 92%;
 }
 @keyframes duck-wobble {
@@ -831,7 +1153,7 @@ html, body, #app {
   75%      { transform: rotate(4deg); }
 }
 
-.k-corgi:not(.a-jump):not(.a-squash):not(.a-shake):not(.m-typing):not(.m-sleep) .pet-body {
+.k-corgi:not(.a-jump):not(.a-squash):not(.a-shake):not(.a-spin):not(.a-walk):not(.a-dance):not(.a-stretch):not(.a-land):not(.m-typing):not(.m-sleep):not([class*="idle-"]):not(.is-grab):not(.is-drag) .pet-body {
   animation: corgi-tilt 5s ease-in-out infinite; transform-origin: 50% 92%;
 }
 @keyframes corgi-tilt {

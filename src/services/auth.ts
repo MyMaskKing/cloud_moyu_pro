@@ -1,7 +1,16 @@
 // 鉴权服务层 —— 当前为 mock 实现,真实后端接入时只需替换本文件,保持导出接口不变。
 // M4(伪装皮肤) / M5(工作进程监测) 为 VIP 功能,统一通过本服务判断权益。
 
+import { ENDPOINTS } from "../config/api";
+
 export type VipFeature = "disguise" | "workMonitor" | "pet";
+
+/**
+ * 是否接入了鉴权后端。
+ * 在 src/config/api.ts 中填入 authStatus 等接口地址后即为 true,走登录/校验流程;
+ * 未配置(默认)时直接以本地 VIP 身份使用,所有功能免登录开放。
+ */
+export const AUTH_ENABLED = !!ENDPOINTS.authStatus.url;
 
 export interface VipEntitlements {
   /** M4:伪装皮肤 */
@@ -56,7 +65,8 @@ function entitlementsFor(isVip: boolean): VipEntitlements {
 }
 
 function isVipActive(status: AuthStatus): boolean {
-  return !!status.vipExpireAt && status.vipExpireAt > Date.now();
+  // isVip=true 且无到期时间 = 永久 VIP(本地免登录模式);否则校验到期时间
+  return !!status.isVip && (!status.vipExpireAt || status.vipExpireAt > Date.now());
 }
 
 interface StoredState {
@@ -143,8 +153,37 @@ const mockService: AuthService = {
   },
 };
 
-// 单例:真实接入时改成 new RealAuthService() 即可,上层无需改动。
-export const authService: AuthService = mockService;
+// ────── 本地免登录模式(未配置鉴权接口时) ──────
+
+const localStatus: AuthStatus = {
+  loggedIn: true,
+  user: { id: "local", nickname: "本地用户" },
+  isVip: true,
+  vipExpireAt: undefined, // 永久 VIP
+  entitlements: { disguise: true, workMonitor: true, pet: true },
+};
+
+const localVipService: AuthService = {
+  async getStatus() {
+    return localStatus;
+  },
+  async login() {
+    return localStatus;
+  },
+  async logout() {
+    // 本地模式无需登录态,退出无意义
+  },
+  async redeem() {
+    return localStatus;
+  },
+  onStatusChange(cb) {
+    listeners.add(cb);
+    return () => listeners.delete(cb);
+  },
+};
+
+// 单例:未配置鉴权接口时直接开放全部 VIP;配置后走 mock/真实登录流程。
+export const authService: AuthService = AUTH_ENABLED ? mockService : localVipService;
 
 /** 供 store / 组件统一调用的权益判断 */
 export function checkEntitlement(status: AuthStatus, feature: VipFeature): EntitlementResult {

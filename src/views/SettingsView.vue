@@ -2,6 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAuthStore } from "../stores/auth";
+import { AUTH_ENABLED } from "../services/auth";
 import { useDisguiseStore } from "../stores/disguise";
 import type { DisguiseSkin } from "../stores/disguise";
 import { usePetStore, PET_MIN, PET_MAX, DEFAULT_PET_LINES } from "../stores/pet";
@@ -307,8 +308,10 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
       <div class="group">
         <div class="group-title">👤 账号与会员</div>
         <div class="group-desc">
-          M4 伪装皮肤、M5 工作监测自动隐藏为 VIP 功能。当前为测试登录环境,
-          任意账号 + 验证码 <code>123456</code> 即可登录,兑换码 <code>MUOYU-VIP</code> 开通。
+          M4 伪装皮肤、M5 工作监测自动隐藏为 VIP 功能。
+          <template v-if="AUTH_ENABLED">请输入您的用户和密码即可登录,登录后输入兑换码开通（）。
+          </template>
+          <template v-else>当前以本地 VIP 身份使用,全部功能已开放。</template>
         </div>
 
         <!-- 未登录:登录表单 -->
@@ -367,7 +370,7 @@ const transpKeyDisplay = computed(() => props.transparencyKey ? humanize(props.t
           <div v-if="auth.error" class="row">
             <span class="hint error">{{ auth.error }}</span>
           </div>
-          <div class="row actions">
+          <div v-if="AUTH_ENABLED" class="row actions">
             <button class="btn" :disabled="authBusy" @click="onLogout">退出登录</button>
           </div>
         </div>

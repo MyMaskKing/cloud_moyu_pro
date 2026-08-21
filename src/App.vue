@@ -552,7 +552,8 @@ const activeTab = computed(() => tabs.active);
 /** 把 holder 的屏幕坐标同步给当前活跃 tab(inline 模式) */
 async function syncCurrentTab() {
   const t = tabs.active;
-  if (!t || t.mode !== "inline" || !holder.value) return;
+  // inline / fullscreen 都把当前子窗贴进 holder(fullscreen 时 holder 由 .fs-content 铺满标题栏下方)
+  if (!t || (t.mode !== "inline" && t.mode !== "fullscreen") || !holder.value) return;
   const rect = holder.value.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
   const outer = await win.outerPosition();
@@ -961,20 +962,12 @@ async function fullscreenInApp(id?: string) {
   await notifyTabMode(t.id);
 }
 
-/** fullscreen 时把子窗口拉满整个 shell 内容区(去掉 titlebar) */
-async function syncFullscreenTab(id: string) {
-  const scale = window.devicePixelRatio || 1;
-  const outer = await win.outerPosition();
-  const inner = await win.innerPosition();
-  const chromeOffsetX = (outer.x - inner.x) / scale;
-  const chromeOffsetY = (outer.y - inner.y) / scale;
-  // shell 内容区 = 主窗口内部区域减去 titlebar(36px)
-  const size = await win.innerSize();
-  const w = size.width / scale;
-  const h = size.height / scale - 36;
-  const x = inner.x / scale + chromeOffsetX;
-  const y = inner.y / scale + chromeOffsetY + 36;
-  await invoke("resize_web_tab", { id, x, y, width: w, height: h });
+/** fullscreen 时把子窗口拉满整个 shell 内容区(标题栏下方)。
+ *  复用 syncCurrentTab 的 holder 矩形算法:fullscreen 下 .fs-content padding:0,
+ *  holder 正好铺满标题栏下方区域,且走同一套 resize_web_tab(Win32 SetWindowPos 按外框),
+ *  避免手算 innerSize-36 在右/下产生度量不一致导致溢出。 */
+async function syncFullscreenTab(_id: string) {
+  await syncCurrentTab();
 }
 
 /** 回到嵌入模式 */
@@ -1726,7 +1719,10 @@ html, body, #app {
   flex: 1; padding: 6px 10px 10px; min-height: 0;
 }
 .content.fs-content {
-  padding: 0;
+  /* 全屏也留窄边:inline 靠 content 的 10px padding 露出主窗边缘做 WM_NCHITTEST 缩放,
+     全屏铺满会让独立子窗盖到边缘、主窗收不到命中。右/下/左留 8px(≥8 物理像素缩放带),
+     顶部靠 36px 标题栏(可拖动)。 */
+  padding: 0 8px 8px 8px;
 }
 .shell.is-fullscreen .web-holder {
   border-radius: 0;

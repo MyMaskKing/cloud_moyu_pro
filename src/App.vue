@@ -211,10 +211,10 @@ function syncUserScripts() {
 }
 watch(() => userScripts.scripts, syncUserScripts, { deep: true });
 
-// 标题栏主题改动 → 立刻推给所有已打开的 popout 子窗,无需重开
+// 标题栏主题改动 → 立刻推给所有已打开的 popout/pip 子窗,无需重开
 watch(popoutTheme, () => {
   for (const t of tabs.tabs) {
-    if (t.mode === "popout") notifyTabMode(t.id);
+    if (t.mode === "popout" || t.mode === "pip") notifyTabMode(t.id);
   }
 });
 
@@ -222,10 +222,10 @@ watch(popoutTheme, () => {
 watch(bossKey, () => {
   for (const t of tabs.tabs) {
     if (t.mode === "pip") {
-      // pip 保留系统标题栏
+      // pip 也用自绘标题栏:无系统边框
       invoke("set_web_tab_chrome", {
         id: t.id,
-        decorations: true,
+        decorations: false,
         skipTaskbar: false,
         alwaysOnTop: true,
         title: popoutTitle(t),
@@ -853,7 +853,7 @@ async function pickContextMenu(key: string) {
         await invoke("set_web_tab_resizable", { id: targetId, resizable: true });
         await invoke("set_web_tab_chrome", {
           id: targetId,
-          decorations: true,
+          decorations: false,
           skipTaskbar: false,
           alwaysOnTop: true,
           title: popoutTitle(t),
@@ -900,10 +900,10 @@ async function togglePip() {
     const y = window.screen.availHeight - size.h - 24;
     await invoke("enter_pip", { id: t.id, x, y, width: size.w, height: size.h });
     await invoke("set_web_tab_resizable", { id: t.id, resizable: true });
-    // pip 也要有系统标题栏,否则无法拖动/关闭
+    // pip 也用自绘标题栏:无系统边框,可拖动/最小化/收回
     await invoke("set_web_tab_chrome", {
       id: t.id,
-      decorations: true,
+      decorations: false,
       skipTaskbar: false,
       alwaysOnTop: true,
       title: popoutTitle(t),
@@ -1261,17 +1261,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="shell" :class="{ 'is-fullscreen': activeTab?.mode === 'fullscreen' }" @contextmenu="openContextMenu">
-    <!-- 无边框窗口 8 方向拉伸手柄(不在 fullscreen 状态才显示) -->
-    <template v-if="activeTab?.mode !== 'fullscreen'">
-      <div class="resize-edge n"  @mousedown="(e) => startResize('North', e)"></div>
-      <div class="resize-edge s"  @mousedown="(e) => startResize('South', e)"></div>
-      <div class="resize-edge w"  @mousedown="(e) => startResize('West', e)"></div>
-      <div class="resize-edge e"  @mousedown="(e) => startResize('East', e)"></div>
-      <div class="resize-corner nw" @mousedown="(e) => startResize('NorthWest', e)"></div>
-      <div class="resize-corner ne" @mousedown="(e) => startResize('NorthEast', e)"></div>
-      <div class="resize-corner sw" @mousedown="(e) => startResize('SouthWest', e)"></div>
-      <div class="resize-corner se" @mousedown="(e) => startResize('SouthEast', e)"></div>
-    </template>
     <!-- 顶部自定义标题栏(换壳伪装时由 DisguiseChrome 提供自己的标题栏) -->
     <header v-if="!chromeActive" class="titlebar" data-tauri-drag-region>
       <span class="brand" data-tauri-drag-region>
@@ -1533,6 +1522,20 @@ onBeforeUnmount(() => {
       </div>
     </div>
   </div>
+
+  <!-- 无边框窗口 8 方向拉伸手柄:放在 .shell 外部,用 fixed 定位到窗口边缘。
+       .shell 有 border-radius+overflow:hidden 会裁剪子元素命中区域,
+       导致右下角等圆角处点不到;移出后不受裁剪。fullscreen 时不显示。 -->
+  <template v-if="activeTab?.mode !== 'fullscreen'">
+    <div class="resize-edge n"  @mousedown="(e) => startResize('North', e)"></div>
+    <div class="resize-edge s"  @mousedown="(e) => startResize('South', e)"></div>
+    <div class="resize-edge w"  @mousedown="(e) => startResize('West', e)"></div>
+    <div class="resize-edge e"  @mousedown="(e) => startResize('East', e)"></div>
+    <div class="resize-corner nw" @mousedown="(e) => startResize('NorthWest', e)"></div>
+    <div class="resize-corner ne" @mousedown="(e) => startResize('NorthEast', e)"></div>
+    <div class="resize-corner sw" @mousedown="(e) => startResize('SouthWest', e)"></div>
+    <div class="resize-corner se" @mousedown="(e) => startResize('SouthEast', e)"></div>
+  </template>
 </template>
 
 <style>
@@ -1770,19 +1773,23 @@ html, body, #app {
 }
 .fs-back:hover { background: #388bfd; }
 
-/* 无边框窗口边缘拉伸手柄 */
+/* 无边框窗口边缘拉伸手柄(fixed 定位在 .shell 外,避免被 shell 圆角+overflow 裁剪命中区)
+   背景给极低 alpha:主窗口 transparent+border-radius,完全透明像素在某些环境下命中不稳,
+   近乎不可见的底色保证整块区域稳定接收鼠标事件。 */
 .resize-edge, .resize-corner {
-  position: absolute;
-  z-index: 100;
+  position: fixed;
+  z-index: 9999;
+  background: rgba(255, 255, 255, 0.02);
+  pointer-events: auto;
 }
-.resize-edge.n  { top: 0; left: 6px; right: 6px; height: 4px; cursor: n-resize; }
-.resize-edge.s  { bottom: 0; left: 6px; right: 6px; height: 4px; cursor: s-resize; }
-.resize-edge.w  { left: 0; top: 6px; bottom: 6px; width: 4px; cursor: w-resize; }
-.resize-edge.e  { right: 0; top: 6px; bottom: 6px; width: 4px; cursor: e-resize; }
-.resize-corner.nw { top: 0; left: 0; width: 8px; height: 8px; cursor: nw-resize; }
-.resize-corner.ne { top: 0; right: 0; width: 8px; height: 8px; cursor: ne-resize; }
-.resize-corner.sw { bottom: 0; left: 0; width: 8px; height: 8px; cursor: sw-resize; }
-.resize-corner.se { bottom: 0; right: 0; width: 8px; height: 8px; cursor: se-resize; }
+.resize-edge.n  { top: 0; left: 8px; right: 8px; height: 6px; cursor: n-resize; }
+.resize-edge.s  { bottom: 0; left: 8px; right: 8px; height: 6px; cursor: s-resize; }
+.resize-edge.w  { left: 0; top: 8px; bottom: 8px; width: 6px; cursor: w-resize; }
+.resize-edge.e  { right: 0; top: 8px; bottom: 8px; width: 6px; cursor: e-resize; }
+.resize-corner.nw { top: 0; left: 0; width: 14px; height: 14px; cursor: nw-resize; }
+.resize-corner.ne { top: 0; right: 0; width: 14px; height: 14px; cursor: ne-resize; }
+.resize-corner.sw { bottom: 0; left: 0; width: 14px; height: 14px; cursor: sw-resize; }
+.resize-corner.se { bottom: 0; right: 0; width: 14px; height: 14px; cursor: se-resize; }
 
 /* 启动打赏弹窗 */
 .ds-mask {

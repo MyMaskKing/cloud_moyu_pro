@@ -29,6 +29,98 @@ static CURRENT_TRANSPARENCY_KEY: Mutex<Option<Shortcut>> = Mutex::new(None);
 /// 记录所有已开启的 web tab label,用于老板键批量隐藏/恢复
 static WEB_TABS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+// ── 主窗无边框缩放:WM_NCHITTEST 原生命中 ──
+// 主窗是 decorations=false + transparent + border-radius 的无边框窗,右下角圆角透明区
+// 的 DOM 热区命中不稳,且 inline 子窗(独立 OS 窗口)会覆盖内容区。这里给主窗窗口过程
+// 挂一层子类:窗口边缘 8 物理像素返回 HT* 缩放命中码,在 OS 层生效,绕过 DOM/透明/子窗。
+#[cfg(windows)]
+const RESIZE_BORDER_PX: i32 = 8;
+#[cfg(windows)]
+static ORIG_MAIN_WNDPROC: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(windows)]
+unsafe extern "system" fn resize_hit_wndproc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, GetWindowRect, WNDPROC,
+    };
+
+    // WM_NCHITTEST = 0x0084
+    if msg == 0x0084 {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_ok() {
+            let v = lparam.0 as u32;
+            // 低/高字是相对屏幕的有符号坐标(多显示器可能为负)
+            let x = (v & 0xffff) as u16 as i16 as i32;
+            let y = ((v >> 16) & 0xffff) as u16 as i16 as i32;
+            let b = RESIZE_BORDER_PX;
+            let left   = x >= rect.left && x < rect.left + b;
+            let right  = x < rect.right && x >= rect.right - b;
+            let top    = y >= rect.top && y < rect.top + b;
+            let bottom = y < rect.bottom && y >= rect.bottom - b;
+            // HTLEFT=10 HTRIGHT=11 HTTOP=12 HTTOPLEFT=13 HTTOPRIGHT=14
+            // HTBOTTOM=15 HTBOTTOMLEFT=16 HTBOTTOMRIGHT=17
+            let code: u32 = match (top, bottom, left, right) {
+                (true,  _, true,  _) => 13,
+                (true,  _, _, true)  => 14,
+                (_, true, true,  _) => 16,
+                (_, true, _, true)  => 17,
+                (true,  _, _, _)    => 12,
+                (_, true, _, _)     => 15,
+                (_, _, true,  _)    => 10,
+                (_, _, _, true)     => 11,
+                _ => 0,
+            };
+            if code != 0 {
+                return windows::Win32::Foundation::LRESULT(code as isize);
+            }
+        }
+    }
+
+    let orig = ORIG_MAIN_WNDPROC.load(std::sync::atomic::Ordering::Relaxed);
+    if orig != 0 {
+        let proc: WNDPROC = Some(core::mem::transmute::<
+            isize,
+            unsafe extern "system" fn(
+                windows::Win32::Foundation::HWND,
+                u32,
+                windows::Win32::Foundation::WPARAM,
+                windows::Win32::Foundation::LPARAM,
+            ) -> windows::Win32::Foundation::LRESULT,
+        >(orig));
+        CallWindowProcW(proc, hwnd, msg, wparam, lparam)
+    } else {
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+/// 给主窗装原生缩放边框(仅 Windows)。非 Windows no-op。
+fn install_main_resize_border(app: &AppHandle) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowLongPtrW, GWLP_WNDPROC};
+        let Some(win) = app.get_webview_window("main") else { return; };
+        let Ok(raw) = win.hwnd() else { return; };
+        let hwnd = HWND(raw.0 as *mut _);
+        unsafe {
+            let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, resize_hit_wndproc as *const () as isize);
+            ORIG_MAIN_WNDPROC.store(prev, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+    }
+}
+
+
 // ────── 用户脚本(迷你油猴) ──────
 //
 // 前端把用户在设置里粘贴的 .user.js 解析为元数据后下发到这里缓存;
@@ -558,10 +650,10 @@ async fn open_web_tab(
             }
           }, true);
 
-          // ── popout 自绘极简标题栏 ──
-          //   popout 改为 decorations=false(无系统标题栏),由这里画一条 34px 标题栏:
+          // ── popout / pip 自绘极简标题栏 ──
+          //   popout 和 pip 都用 decorations=false(无系统标题栏),由这里画一条 34px 标题栏:
           //   平时隐藏,鼠标碰到窗口最顶部 5px 热区时滑出,离开约 0.9s 后收回,不挡网页。
-          //   左侧网页标题(可拖动窗口/双击最大化),右侧 📌置顶 / ➖最小化 / ✕收回摸鱼窗。
+          //   左侧网页标题(可拖动窗口/双击最大化),右侧 📌置顶(popout, pip 天然置顶故隐藏) / ➖最小化 / ✕收回摸鱼窗。
           //   主题(深/浅/跟随系统)由主窗通过 __muoyuOnMode 下发。
           var tbBar = null, tbPin = null, tbHideTimer = null, tbInFs = false, tbActive = false;
           var TB_THEME = 'system';
@@ -703,16 +795,18 @@ async fn open_web_tab(
           //   theme: 'dark' | 'light' | 'system'
           window.__muoyuOnMode = function(mode, pinned, theme) {
             ensureTitlebar();
-            var show = mode === 'popout';
+            var show = mode === 'popout' || mode === 'pip';
             tbActive = show;
             if (show) {
-              // 从"应用内全屏"直接切到独立窗口时,网页内 fake fullscreen 仍在
+              // 从"应用内全屏"直接切到独立窗口/画中画时,网页内 fake fullscreen 仍在
               //   (视频被 position:fixed 撑满、tbInFs=true),会盖住标题栏并让标题栏无法滑出。
-              //   进 popout 时退出它,还原视频样式并复位 tbInFs。
-              //   主窗监听收到 signal(fullscreen,false)时因 mode 已是 popout 会直接 return,无副作用。
+              //   进 popout/pip 时退出它,还原视频样式并复位 tbInFs。
+              //   主窗监听收到 signal(fullscreen,false)时因 mode 已是 popout/pip 会直接 return,无副作用。
               try { if (typeof exitFake === 'function') exitFake(); } catch (e) {}
             }
             tbBar.style.display = show ? 'flex' : 'none';
+            // pip 天然置顶,不显示置顶按钮;popout 显示
+            tbPin.style.display = (mode === 'popout') ? 'flex' : 'none';
             if (!show) { tbCancelHide(); tbBar.style.transform = 'translateY(-100%)'; tbBar.style.pointerEvents = 'none'; }
             if (theme === 'dark' || theme === 'light' || theme === 'system') TB_THEME = theme;
             tbApplyTheme();
@@ -776,7 +870,39 @@ async fn resize_web_tab(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window(&tab_label(&id)) {
+    let win = match app.get_webview_window(&tab_label(&id)) {
+        Some(w) => w,
+        None => return Ok(()),
+    };
+
+    // Windows: Tauri 的 set_position/set_size 分别以"外框位置 + 客户区尺寸"为语义,
+    // 无边框子窗若残留非客户区度量(WS_THICKFRAME/边框),外框会比请求的客户区多出一截,
+    // 表现为子窗右/下边溢出 holder。这里直接用 SetWindowPos 按"外框矩形"精确设置,
+    // 让子窗外框严格等于传入的 (x,y,width,height) 逻辑矩形。
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+        };
+        let raw = win.hwnd().map_err(|e| e.to_string())?;
+        let hwnd = HWND(raw.0 as *mut _);
+        let scale = win.scale_factor().map_err(|e| e.to_string())?;
+        let px = (x * scale).round() as i32;
+        let py = (y * scale).round() as i32;
+        let pw = (width * scale).round() as i32;
+        let ph = (height * scale).round() as i32;
+        unsafe {
+            SetWindowPos(
+                hwnd, None, px, py, pw, ph,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
         win.set_position(LogicalPosition::new(x, y)).map_err(|e| e.to_string())?;
         win.set_size(LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
     }
@@ -1839,6 +1965,8 @@ pub fn run() {
             set_user_scripts,
         ])
         .setup(move |app| {
+            // 主窗无边框缩放:挂 WM_NCHITTEST 子类,边缘 8px 原生可拉伸(必须在 show 前装好)
+            install_main_resize_border(app.handle());
             if let Some(win) = app.get_webview_window("main") {
                 // 主窗关闭 → 级联销毁所有子窗。
                 // popout 等通过 owner 挂靠主窗,但 Windows 不会随 owner 关闭自动关闭 owned 窗口,

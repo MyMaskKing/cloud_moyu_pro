@@ -25,6 +25,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 sysinfo = "0.39"
+# 用户脚本 GM_xmlhttpRequest 后端:绕过浏览器 CORS 跨域请求第三方解析接口。
+# 用 rustls,避免 Windows 上引入 OpenSSL;阻塞调用放在 spawn_blocking 里不卡主线程。
+ureq = { version = "2", features = ["json"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

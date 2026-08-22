@@ -193,21 +193,74 @@ watch(
   { deep: true },
 );
 
-// 用户脚本:把启用脚本全集下发到 Rust,新建子窗时拼进 init_script。
-// 脚本在子窗创建时注入,增删改后需重开标签才生效(无运行时重注册 API)。
-function syncUserScripts() {
-  invoke("set_user_scripts", {
-    scripts: userScripts.scripts.map((s) => ({
-      id: s.id,
-      name: s.name,
-      code: s.code,
-      matches: s.matches,
-      includes: s.includes,
-      excludes: s.excludes,
-      runAt: s.runAt,
-      enabled: s.enabled,
-    })),
-  }).catch((e) => console.error("set_user_scripts failed", e));
+// 用户脚本:把启用脚本全集下发到 Rust。脚本在子窗建窗时通过 initialization_script
+// (WebView2 AddScriptToExecuteOnDocumentCreated)在真正的 document-start 注入——
+// 这是让视频破解/播放器 hook 这类 @run-at document-start 脚本在页面脚本之前拿到执行权
+// 的唯一可靠方式;运行时再 eval 最早也晚于页面脚本,对这类脚本无效。
+// initialization_script 在建窗时固化、建窗后无法改,所以增删改/启停后,已打开的标签
+// 必须"销毁子窗再按同一 URL/几何重建"才能用上新脚本(重建等价于一次彻底刷新,会丢失
+// 该标签的滚动/SPA/表单状态,与刷新行为一致)。冷启动 onMounted 的首次同步不重建
+// (标签即将首次建窗,建窗时即拿到最新脚本)。popout/pip 是独立浮窗,重建需另算 chrome
+// 几何,暂不热更——它们下次被打开会自然用新脚本。
+let isFirstUserScriptsSync = true;
+async function syncUserScripts() {
+  try {
+    await invoke("set_user_scripts", {
+      scripts: userScripts.scripts.map((s) => ({
+        id: s.id,
+        name: s.name,
+        code: s.code,
+        matches: s.matches,
+        includes: s.includes,
+        excludes: s.excludes,
+        requires: s.requires,
+        runAt: s.runAt,
+        enabled: s.enabled,
+      })),
+    });
+  } catch (e) {
+    console.error("set_user_scripts failed", e);
+    return;
+  }
+  if (isFirstUserScriptsSync) {
+    isFirstUserScriptsSync = false;
+    return;
+  }
+  // 收集已建窗的 inline/fullscreen 标签,按当前 holder 几何逐个销毁+重建
+  if (!holder.value) return;
+  // 遮罩层(设置/打赏/更新弹窗)开着时,重建的子窗必须建为隐藏,否则独立 OS 子窗
+  // 会闪一下盖在遮罩层之上(白屏穿帮)。隐藏子窗仍会加载页面并在 document-start 注入脚本。
+  const isMasked = showSettings.value || dashangVisible.value || forceUpdateVisible.value;
+  const rect = holder.value.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const outer = await win.outerPosition();
+  const inner = await win.innerPosition();
+  const chromeOffsetX = (outer.x - inner.x) / scale;
+  const chromeOffsetY = (outer.y - inner.y) / scale;
+  const x = inner.x / scale + rect.left + chromeOffsetX;
+  const y = inner.y / scale + rect.top + chromeOffsetY;
+  const width = rect.width;
+  const height = rect.height;
+  for (const t of tabs.tabs) {
+    if (t.mode !== "inline" && t.mode !== "fullscreen") continue;
+    const exists = await invoke<boolean>("web_tab_exists", { id: t.id }).catch(() => false);
+    if (!exists) continue;
+    await invoke("close_web_tab", { id: t.id }).catch(() => {});
+    await invoke("open_web_tab", {
+      id: t.id, url: t.url, x, y, width, height, show: !isMasked,
+    }).catch(() => {});
+    await invoke("set_web_tab_opacity", { id: t.id, opacity: effectiveOpacity.value }).catch(() => {});
+    if (isMasked) {
+      // 遮罩层期间:所有重建的子窗一律保持隐藏,不触发 activateVisual 的 show。
+      await invoke("set_web_tab_visible", { id: t.id, visible: false }).catch(() => {});
+    } else if (t.id !== tabs.activeId) {
+      // open_web_tab 会 show()。非活跃标签立即隐藏,避免重建瞬间在屏幕上叠闪;
+      // 最后由 activateVisual 统一把当前活跃标签摆正并显示。
+      await invoke("set_web_tab_visible", { id: t.id, visible: false }).catch(() => {});
+    }
+  }
+  // 遮罩层开着时不做任何 show;等遮罩关闭时 watch(showSettings) 会按活跃 tab 恢复。
+  if (!isMasked && tabs.activeId) await activateVisual(tabs.activeId);
 }
 watch(() => userScripts.scripts, syncUserScripts, { deep: true });
 
@@ -1036,8 +1089,11 @@ onMounted(async () => {
   await nextTick();
   // 鉴权状态初始化(异步拉取,不阻塞主窗口)
   auth.init().catch(() => {});
-  // 把已持久化的用户脚本下发到 Rust(冷启动恢复后)
-  syncUserScripts();
+  // 把已持久化的用户脚本下发到 Rust(冷启动恢复后)。
+  // 必须 await:set_user_scripts 会预拉取 @require 依赖,完成后才写 USER_SCRIPTS。
+  // 若不等它就建子窗,build_userscript_boot 会读到空脚本集,导致冷启动后插件不运行
+  // (热加载时数据已在内存,无此竞态)。首次同步只下发不重建,见 isFirstUserScriptsSync。
+  await syncUserScripts();
   // 拉取远端启动配置:
   //  - forcedUpdate=true 且 lastUpdate.version 与本地不一致 → 弹强制更新(优先,不可关闭,不处理打赏)
   //  - 否则 popDashang=true 且未选"不再提示"时弹打赏窗

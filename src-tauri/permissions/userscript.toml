@@ -1,0 +1,18 @@
+# 用户脚本(油猴)运行时 API。这些命令由注入到 remote(https) 子窗的 runner 调用,
+# 仅在用户主动安装并启用某脚本时生效。
+#
+# 安全说明:
+# - us_xhr:由 Rust 后端发起 HTTP,绕过浏览器 CORS(GM_xmlhttpRequest 的本质)。
+#   能请求任意 http(s) URL——这是用户脚本的预期能力,等同于安装 Tampermonkey 后
+#   脚本获得的跨域权限。脚本来源与启停由用户在设置页控制。
+# - us_open_in_tab:用系统默认浏览器打开 URL。
+
+[[permission]]
+identifier = "allow-us-xhr"
+description = "允许用户脚本调用 GM_xmlhttpRequest(后端代理 HTTP,绕过 CORS)"
+commands.allow = ["us_xhr"]
+
+[[permission]]
+identifier = "allow-us-open-in-tab"
+description = "允许用户脚本调用 GM_openInTab(系统浏览器打开)"
+commands.allow = ["us_open_in_tab"]

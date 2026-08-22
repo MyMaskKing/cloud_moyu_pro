@@ -10,6 +10,7 @@ export interface UserScript {
   matches: string[];
   includes: string[];
   excludes: string[];
+  requires: string[];
   runAt: RunAt;
   enabled: boolean;
   createdAt: number;
@@ -24,6 +25,7 @@ interface RawScript {
   matches: string[];
   includes: string[];
   excludes: string[];
+  requires?: string[];
   runAt: string;
   enabled: boolean;
   createdAt: number;
@@ -41,6 +43,7 @@ function loadPersisted(): UserScript[] {
       matches: s.matches ?? [],
       includes: s.includes ?? [],
       excludes: s.excludes ?? [],
+      requires: s.requires ?? [],
       runAt: s.runAt === "document-start" ? "document-start" : "document-end",
       enabled: s.enabled !== false,
       createdAt: s.createdAt ?? 0,
@@ -92,6 +95,9 @@ export function parseUserScript(
     ...metaValues(lines, "exclude"),
     ...metaValues(lines, "exclude_match"),
   ];
+  const requires = metaValues(lines, "require")
+    .map((u) => u.trim())
+    .filter((u) => /^https?:\/\//i.test(u));
   const runRaw = (metaValues(lines, "run-at")[0] || "").trim().toLowerCase();
   const runAt: RunAt = runRaw === "document-start" ? "document-start" : "document-end";
 
@@ -101,7 +107,7 @@ export function parseUserScript(
 
   return {
     ok: true,
-    script: { name, code, matches, includes, excludes, runAt },
+    script: { name, code, matches, includes, excludes, requires, runAt },
   };
 }
 

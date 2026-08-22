@@ -18,6 +18,8 @@
     "allow-signal-video-play",
     "allow-signal-video-fullscreen",
     "allow-signal-pin-toggle",
-    "allow-popout-controls"
+    "allow-popout-controls",
+    "allow-us-xhr",
+    "allow-us-open-in-tab"
   ]
 }

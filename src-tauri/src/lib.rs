@@ -141,13 +141,62 @@ struct UserScript {
     excludes: Vec<String>,
     run_at: String,
     enabled: bool,
+    /// @require 外链脚本 URL(如 jQuery),由 Rust 预拉取后拼到用户代码前执行
+    #[serde(default)]
+    requires: Vec<String>,
 }
 
 /// 前端下发的启用脚本全集(仅 main 窗口调用,见 app-commands.toml)
 static USER_SCRIPTS: Mutex<Vec<UserScript>> = Mutex::new(Vec::new());
 
+/// @require 外链脚本的内容缓存:url → 代码。set_user_scripts 时预拉取,
+/// build_userscript_boot 同步读取(建窗主线程上不做网络请求)。
+static REQUIRE_CACHE: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// 同步拉取一个 @require URL 的内容(仅在 spawn_blocking 里调用)。
+fn fetch_require(url: &str) -> Result<String, String> {
+    let resp = ureq::get(url)
+        .timeout(Duration::from_secs(15))
+        .call()
+        .map_err(|e| e.to_string())?;
+    resp.into_string().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn set_user_scripts(scripts: Vec<UserScript>) -> Result<(), String> {
+async fn set_user_scripts(scripts: Vec<UserScript>) -> Result<(), String> {
+    // 收集所有需要预拉取的 @require URL(去重,跳过已缓存)
+    let mut to_fetch: Vec<String> = Vec::new();
+    {
+        let cache = REQUIRE_CACHE.lock().map_err(|e| e.to_string())?;
+        for s in &scripts {
+            for u in &s.requires {
+                if !cache.contains_key(u) && !to_fetch.contains(u) {
+                    to_fetch.push(u.clone());
+                }
+            }
+        }
+    }
+    // 阻塞拉取放进 spawn_blocking,不卡主线程
+    if !to_fetch.is_empty() {
+        let fetched = tauri::async_runtime::spawn_blocking(move || {
+            let mut out: Vec<(String, Result<String, String>)> = Vec::new();
+            for u in to_fetch {
+                let r = fetch_require(&u);
+                out.push((u, r));
+            }
+            out
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        if let Ok(mut cache) = REQUIRE_CACHE.lock() {
+            for (u, r) in fetched {
+                if let Ok(code) = r {
+                    cache.insert(u, code);
+                }
+            }
+        }
+    }
     match USER_SCRIPTS.lock() {
         Ok(mut g) => {
             *g = scripts;
@@ -155,6 +204,115 @@ fn set_user_scripts(scripts: Vec<UserScript>) -> Result<(), String> {
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// GM_xmlhttpRequest 的请求入参(仅支持该 VIP 解析脚本用到的字段子集)。
+#[derive(serde::Deserialize)]
+struct UsXhrArgs {
+    method: Option<String>,
+    url: String,
+    headers: Option<std::collections::HashMap<String, String>>,
+    data: Option<String>,
+    /// 超时(毫秒)
+    timeout: Option<u64>,
+}
+
+/// GM_xmlhttpRequest 的成功回调对象,字段对齐 Tampermonkey 的 response 对象。
+#[derive(serde::Serialize)]
+struct UsXhrResponse {
+    status: u16,
+    #[serde(rename = "statusText")]
+    status_text: String,
+    #[serde(rename = "responseText")]
+    response_text: String,
+    #[serde(rename = "responseHeaders")]
+    response_headers: String,
+    #[serde(rename = "finalUrl")]
+    final_url: String,
+    ready_state: u8,
+}
+
+/// GM_xmlhttpRequest 后端:由 Rust 发起 HTTP,绕过浏览器 CORS/混合内容限制。
+/// ureq 是阻塞 API,放进 spawn_blocking 跑,async 命令本身不阻塞主线程。
+#[tauri::command]
+async fn us_xhr(args: UsXhrArgs) -> Result<UsXhrResponse, String> {
+    let url = args.url.clone();
+    let method = args.method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
+    let headers = args.headers.unwrap_or_default();
+    let data = args.data;
+    let timeout = args.timeout.unwrap_or(30_000);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut req = ureq::request(&method, &url)
+            .timeout(Duration::from_millis(timeout));
+        for (k, v) in &headers {
+            req = req.set(k, v);
+        }
+        let resp = if method == "POST" || method == "PUT" || method == "PATCH" {
+            req.send_string(data.as_deref().unwrap_or(""))
+        } else {
+            req.call()
+        };
+        match resp {
+            Ok(r) => {
+                let status = r.status();
+                let status_text = r.status_text().to_string();
+                let final_url = r.get_url().to_string();
+                let mut response_headers = String::new();
+                for key in r.headers_names() {
+                    if let Some(v) = r.header(&key) {
+                        response_headers.push_str(&key);
+                        response_headers.push_str(": ");
+                        response_headers.push_str(v);
+                        response_headers.push('\n');
+                    }
+                }
+                let response_text = r.into_string().map_err(|e| e.to_string())?;
+                Ok(UsXhrResponse {
+                    status,
+                    status_text,
+                    response_text,
+                    response_headers,
+                    final_url,
+                    ready_state: 4,
+                })
+            }
+            // ureq::Error::Status 代表非 2xx,但仍带响应体——GM_xmlhttpRequest 把它交给脚本自己处理
+            Err(ureq::Error::Status(code, r)) => {
+                let status_text = r.status_text().to_string();
+                let final_url = r.get_url().to_string();
+                let mut response_headers = String::new();
+                for key in r.headers_names() {
+                    if let Some(v) = r.header(&key) {
+                        response_headers.push_str(&key);
+                        response_headers.push_str(": ");
+                        response_headers.push_str(v);
+                        response_headers.push('\n');
+                    }
+                }
+                let response_text = r.into_string().map_err(|e| e.to_string())?;
+                Ok(UsXhrResponse {
+                    status: code,
+                    status_text,
+                    response_text,
+                    response_headers,
+                    final_url,
+                    ready_state: 4,
+                })
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// GM_openInTab 后端:用系统默认浏览器打开 URL(桌面应用无"新标签页"概念)。
+#[tauri::command]
+fn us_open_in_tab(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 /// 生成注入到每个 web-tab 子窗的用户脚本 runner 代码。
@@ -171,13 +329,32 @@ fn build_userscript_boot() -> String {
         Ok(j) => j,
         Err(_) => return String::new(),
     };
+    // 把本批脚本用到的 @require 代码(url->内容)内联,供 runner 在用户代码前 eval。
+    // 缓存由 set_user_scripts 预拉取填充;缺失的 URL 留空,runner 记日志。
+    let require_json = {
+        let cache = match REQUIRE_CACHE.lock() {
+            Ok(g) => g,
+            Err(_) => return String::new(),
+        };
+        let mut map = serde_json::Map::new();
+        for s in &scripts {
+            for u in &s.requires {
+                if !map.contains_key(u) {
+                    map.insert(u.clone(), serde_json::Value::String(cache.get(u).cloned().unwrap_or_default()));
+                }
+            }
+        }
+        serde_json::Value::Object(map).to_string()
+    };
     // 注意:JSON 已是合法 JS 字面量,直接内联。runner 自身用普通函数作用域隔离,
     // 用户代码再经 new Function 包裹,顶层变量不污染页面全局。
     format!(
         r#"
         (function(){{
           var SCRIPTS = {json};
+          var REQUIRE_CODE = {require_json};
           if (!SCRIPTS.length) return;
+          var __bridge = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
           function escRe(s){{ return String(s).replace(/[.*+?^${{}}()|[\]\\]/g,'\\$&'); }}
           // @match 语法:scheme://host/path,* 为通配;<all_urls> 匹配任意 http(s)
           function patToRe(pat){{
@@ -232,17 +409,86 @@ fn build_userscript_boot() -> String {
                 return Object.keys(localStorage).filter(function(x){{
                   return x.indexOf(ns)===0;
                 }}).map(function(x){{ return x.slice(ns.length); }});
+              }},
+              // GM_xmlhttpRequest:跨域请求由 Rust us_xhr 代理(绕过 CORS)。
+              // 回调风格对齐 Tampermonkey,仅实现 onreadystatechange/onload/onerror/ontimeout/onabort。
+              GM_xmlhttpRequest: function(opts){{
+                opts = opts || {{}};
+                var hdrs = {{}};
+                if (opts.headers) {{
+                  for (var k in opts.headers) if (Object.prototype.hasOwnProperty.call(opts.headers,k)) hdrs[k]=String(opts.headers[k]);
+                }}
+                var payload = {{
+                  method: opts.method || 'GET',
+                  url: opts.url,
+                  headers: hdrs,
+                  data: (opts.data == null) ? null : String(opts.data),
+                  timeout: (opts.timeout|0) || 30000
+                }};
+                function emit(name, ctx){{
+                  try {{ if (typeof opts[name]==='function') opts[name](ctx); }} catch(e) {{}}
+                }}
+                var aborted = false;
+                if (__bridge) {{
+                  emit('onreadystatechange', {{ readyState:1, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url }});
+                  __bridge('us_xhr', {{ args: payload }}).then(function(res){{
+                    if (aborted) {{ emit('onabort', {{ readyState:4, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url }}); return; }}
+                    var ctx = {{
+                      readyState: 4,
+                      status: res.status | 0,
+                      statusText: res.statusText,
+                      responseText: res.responseText,
+                      response: res.responseText,
+                      responseHeaders: res.responseHeaders,
+                      finalUrl: res.finalUrl || opts.url,
+                      responseXML: false
+                    }};
+                    emit('onreadystatechange', ctx);
+                    emit('onload', ctx);
+                    emit('onloadend', ctx);
+                  }}).catch(function(err){{
+                    if (aborted) return;
+                    var msg = (err && err.message) ? err.message : String(err);
+                    var ctx = {{ readyState:4, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url, error:msg }};
+                    emit('onreadystatechange', ctx);
+                    if (/timeout/i.test(msg)) emit('ontimeout', ctx);
+                    else emit('onerror', ctx);
+                    emit('onloadend', ctx);
+                  }});
+                }} else {{
+                  emit('onerror', {{ readyState:4, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url, error:'no bridge' }});
+                }}
+                return {{
+                  abort: function(){{ aborted = true; }}
+                }};
+              }},
+              GM_openInTab: function(url){{
+                try {{ if (__bridge) __bridge('us_open_in_tab', {{ url: String(url) }}); }} catch(e) {{}}
+                return {{ close: function(){{}}, onclose: null }};
               }}
             }};
           }}
           function run(s){{
+            // @require:在全局作用域(间接 eval)执行外链依赖,使其定义的 $/jQuery 等
+            // 挂到 window 上,用户代码才能访问。代码由 Rust 预拉取并内联在 REQUIRE_CODE。
+            if (s.requires && s.requires.length) {{
+              s.requires.forEach(function(u){{
+                var code = REQUIRE_CODE[u];
+                if (!code) return;
+                try {{ (0, eval)(code); }} catch(e) {{}}
+              }});
+            }}
             var g = makeGm(s);
             try {{
               (new Function('GM_info','GM_addStyle','GM_setValue','GM_getValue',
-                'GM_deleteValue','GM_listValues','unsafeWindow', s.code))
+                'GM_deleteValue','GM_listValues','unsafeWindow',
+                'GM_xmlhttpRequest','GM_openInTab', s.code))
                 (g.GM_info, g.GM_addStyle, g.GM_setValue, g.GM_getValue,
-                 g.GM_deleteValue, g.GM_listValues, g.unsafeWindow);
-            }} catch(e) {{ console.warn('[userscript] ' + s.name + ':', e); }}
+                 g.GM_deleteValue, g.GM_listValues, g.unsafeWindow,
+                 g.GM_xmlhttpRequest, g.GM_openInTab);
+            }} catch(e) {{
+              // 用户脚本自身错误不冒泡到页面
+            }}
           }}
           var startNow = [], later = [];
           SCRIPTS.forEach(function(s){{
@@ -258,7 +504,8 @@ fn build_userscript_boot() -> String {
           }}
         }})();
 "#,
-        json = json
+        json = json,
+        require_json = require_json
     )
 }
 
@@ -447,14 +694,22 @@ async fn open_web_tab(
     y: f64,
     width: f64,
     height: f64,
+    show: Option<bool>,
 ) -> Result<(), String> {
     let label = tab_label(&id);
+    // 缺省 true:保持所有现有调用"建窗即显示"的行为。脚本热更重建时若遮罩层
+    // (设置/打赏/更新弹窗)正开着,前端传 false,避免新建子窗闪一下盖在遮罩层上。
+    let want_show = show.unwrap_or(true);
 
     // 已存在 = 只切位置/尺寸并显示(可能是复用同一 tab 的 inline 刷新)
     if let Some(existing) = app.get_webview_window(&label) {
         existing.set_position(LogicalPosition::new(x, y)).map_err(|e| e.to_string())?;
         existing.set_size(LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
-        existing.show().map_err(|e| e.to_string())?;
+        if want_show {
+            existing.show().map_err(|e| e.to_string())?;
+        } else {
+            let _ = existing.hide();
+        }
         return Ok(());
     }
 
@@ -821,7 +1076,11 @@ async fn open_web_tab(
         })();
     "#;
     let init_script = init_script_tpl.replace("__MUOYU_TAB_ID__", &id);
-    // 用户脚本 runner(无启用脚本时为空串),追加在应用自身注入之后
+    // 用户脚本在建窗时拼进 initialization_script(WebView2 AddScriptToExecuteOnDocumentCreated,
+    // 真正的 document-start,每次导航都在新文档最早时机执行)。这是唯一能保证 @run-at
+    // document-start 脚本(如视频破解/播放器 hook)在页面前拿到执行权的注入方式。
+    // 它的字符串在 webview 创建时固化,建窗后无法改;因此前端在脚本变更时会销毁并
+    // 重建该标签的子窗(见 App.vue syncUserScripts),重建即拿到最新脚本,实现热加载。
     let init_script = init_script + &build_userscript_boot();
 
     let win = WebviewWindowBuilder::new(&app, &label, parsed)
@@ -833,6 +1092,7 @@ async fn open_web_tab(
         .position(x, y)
         .initialization_script(init_script)
         .user_agent(WEB_TAB_USER_AGENT)
+        .visible(want_show)
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -856,7 +1116,11 @@ async fn open_web_tab(
         }
     });
 
-    let _ = win.show();
+    // 建窗时已按 want_show 决定初始可见性;此处仅在需要显示时补一次 show
+    // (builder.visible 在部分平台首次 show 前不抢焦点,显式 show 保证键鼠焦点)。
+    if want_show {
+        let _ = win.show();
+    }
     remember_tab(label);
     Ok(())
 }
@@ -1963,6 +2227,8 @@ pub fn run() {
             is_pet_mode,
             pet_say,
             set_user_scripts,
+            us_xhr,
+            us_open_in_tab,
         ])
         .setup(move |app| {
             // 主窗无边框缩放:挂 WM_NCHITTEST 子类,边缘 8px 原生可拉伸(必须在 show 前装好)

@@ -31,7 +31,7 @@ export const ENDPOINTS = {
    *     "popDashang": boolean,      // 是否在启动时弹出打赏弹窗
    *     "lastUpdate": {             // version 与本地(package.json)不一致时每次启动弹
    *       "url": string,            //   下载/更新页地址(系统浏览器打开)
-   *       "message": string,        //   更新说明,多段用逗号或换行分隔
+   *       "message": string[],      //   更新说明,字符串数组,每个元素渲染为一行
    *       "version": string         //   远端最新版本号,须为语义化版本如 "0.1.0"
    *     },
    *     "forcedUpdate": boolean     // true=更新窗不可关闭(只能立即更新);
@@ -64,8 +64,8 @@ export const DASHANG_IMAGES = [
 export interface ForceUpdateInfo {
   /** 下载 / 更新页地址(用系统默认浏览器打开) */
   url: string;
-  /** 更新说明,多段用逗号或换行分隔 */
-  message: string;
+  /** 更新说明,字符串数组,每个元素渲染为一行 */
+  message: string[];
   /** 远端最新版本号,语义化版本如 "0.1.0",与本地 package.json.version 比较 */
   version: string;
 }

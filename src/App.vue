@@ -1112,11 +1112,10 @@ onMounted(async () => {
     ) {
       forceUpdateUrl.value = fu.url;
       forceUpdateClosable.value = cfg.forcedUpdate !== true;
-      // message 按逗号或换行分割成多段
-      forceUpdateLines.value = String(fu.message ?? "")
-        .split(/[,\n]/)
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
+      // message 已是字符串数组,直接按行展示;容错过滤非字符串/空串
+      forceUpdateLines.value = Array.isArray(fu.message)
+        ? fu.message.map((s) => String(s).trim()).filter((s) => s.length > 0)
+        : [];
       forceUpdateVisible.value = true;
       // 更新窗优先;打赏若也需要,等更新窗关闭后再弹
       if (cfg.popDashang && !dashangHiddenBefore()) {
@@ -1932,6 +1931,14 @@ html, body, #app {
   font-size: 13px;
   color: #c9d1d9;
   line-height: 1.7;
+  /* 公告条目过多时内部滚动,避免弹窗整体超出屏幕 */
+  max-height: 50vh;
+  overflow-y: auto;
 }
-.fu-notes li { list-style: disc; }
+.fu-notes li {
+  list-style: disc;
+  /* 长 URL 等连续无空格字符强制换行,不被挤出弹窗 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 </style>

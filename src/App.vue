@@ -59,6 +59,37 @@ function closeForceUpdate() {
   if (forceUpdateClosable.value) forceUpdateVisible.value = false;
 }
 
+// 把公告一行拆成 text/link 片段,便于在模板里把 URL 渲染成可点击链接。
+// 链接匹配 http(s)://,吞到空白或常见结束标点为止(URL 内部允许的 . , 等不算结束)。
+const URL_IN_TEXT_RE = /(https?:\/\/[^\s<>"']+)/gi;
+type NotePart = { type: "text"; value: string } | { type: "link"; value: string };
+function parseNoteLine(line: string): NotePart[] {
+  const parts: NotePart[] = [];
+  let lastIndex = 0;
+  // 重置全局正则的 lastIndex(同一正则被复用时必须)
+  URL_IN_TEXT_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = URL_IN_TEXT_RE.exec(line)) !== null) {
+    if (m.index > lastIndex) {
+      parts.push({ type: "text", value: line.slice(lastIndex, m.index) });
+    }
+    let url = m[0];
+    // 去掉句尾标点(中英文逗号/句号/分号/右括号等),它们不太可能是 URL 的一部分
+    url = url.replace(/[，。、；：,.;:!?)）】]+$/u, "");
+    parts.push({ type: "link", value: url });
+    lastIndex = m.index + m[0].length;
+  }
+  if (lastIndex < line.length) {
+    parts.push({ type: "text", value: line.slice(lastIndex) });
+  }
+  return parts;
+}
+function openNoteLink(url: string, ev: MouseEvent) {
+  // 必须用系统浏览器打开,否则会在主 webview 里跳转,丢掉整个应用壳
+  ev.preventDefault();
+  openUrl(url).catch(() => {});
+}
+
 // 更新窗优先显示;若同时需要弹打赏,更新窗关闭后再弹(强制更新窗不可关,打赏就不弹)
 const dashangPending = ref(false);
 
@@ -1560,7 +1591,19 @@ onBeforeUnmount(() => {
           {{ forceUpdateClosable ? '有新版本可用,建议更新' : '当前版本过低,请更新后继续使用' }}
         </p>
         <ul v-if="forceUpdateLines.length" class="fu-notes">
-          <li v-for="(line, i) in forceUpdateLines" :key="i">{{ line }}</li>
+          <li v-for="(line, i) in forceUpdateLines" :key="i">
+            <template v-for="(part, j) in parseNoteLine(line)" :key="j">
+              <a
+                v-if="part.type === 'link'"
+                :href="part.value"
+                class="fu-link"
+                target="_blank"
+                rel="noopener noreferrer"
+                @click="openNoteLink(part.value, $event)"
+                >{{ part.value }}</a
+              ><template v-else>{{ part.value }}</template>
+            </template>
+          </li>
         </ul>
         <button class="btn primary fu-update-btn" @click="openForceUpdate">立即更新</button>
         <button
@@ -1941,4 +1984,9 @@ html, body, #app {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+.fu-link {
+  color: #58a6ff;
+  text-decoration: none;
+}
+.fu-link:hover { text-decoration: underline; }
 </style>

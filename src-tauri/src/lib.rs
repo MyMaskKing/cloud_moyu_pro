@@ -144,6 +144,9 @@ struct UserScript {
     /// @require 外链脚本 URL(如 jQuery),由 Rust 预拉取后拼到用户代码前执行
     #[serde(default)]
     requires: Vec<String>,
+    /// @noframes:不在子 iframe 中执行
+    #[serde(default)]
+    no_frames: bool,
 }
 
 /// 前端下发的启用脚本全集(仅 main 窗口调用,见 app-commands.toml)
@@ -385,6 +388,8 @@ fn build_userscript_boot() -> String {
                   || s.includes.some(function(p){{ return incToRe(p).test(loc); }});
             return false; // 无 include/match 规则 = 不注入(安全默认)
           }}
+          // @noframes:脚本声明不在子 iframe 中执行(WebView2 init_script 会注入到所有 frame)
+          function inSubframe(){{ try {{ return window.top !== window.self; }} catch(e) {{ return true; }} }}
           function makeGm(s){{
             var ns = '__moyu_gm_' + s.id + '_';
             return {{
@@ -430,9 +435,10 @@ fn build_userscript_boot() -> String {
                 }}
                 var aborted = false;
                 if (__bridge) {{
-                  emit('onreadystatechange', {{ readyState:1, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url }});
+                  // 透传 opts.context,回调里脚本可凭它取回发起时上下文(对齐 Tampermonkey)
+                  emit('onreadystatechange', {{ readyState:1, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url, context:opts.context }});
                   __bridge('us_xhr', {{ args: payload }}).then(function(res){{
-                    if (aborted) {{ emit('onabort', {{ readyState:4, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url }}); return; }}
+                    if (aborted) {{ emit('onabort', {{ readyState:4, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url, context:opts.context }}); return; }}
                     var ctx = {{
                       readyState: 4,
                       status: res.status | 0,
@@ -441,7 +447,8 @@ fn build_userscript_boot() -> String {
                       response: res.responseText,
                       responseHeaders: res.responseHeaders,
                       finalUrl: res.finalUrl || opts.url,
-                      responseXML: false
+                      responseXML: false,
+                      context: opts.context
                     }};
                     emit('onreadystatechange', ctx);
                     emit('onload', ctx);
@@ -449,14 +456,14 @@ fn build_userscript_boot() -> String {
                   }}).catch(function(err){{
                     if (aborted) return;
                     var msg = (err && err.message) ? err.message : String(err);
-                    var ctx = {{ readyState:4, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url, error:msg }};
+                    var ctx = {{ readyState:4, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url, error:msg, context:opts.context }};
                     emit('onreadystatechange', ctx);
                     if (/timeout/i.test(msg)) emit('ontimeout', ctx);
                     else emit('onerror', ctx);
                     emit('onloadend', ctx);
                   }});
                 }} else {{
-                  emit('onerror', {{ readyState:4, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url, error:'no bridge' }});
+                  emit('onerror', {{ readyState:4, status:0, responseText:'', responseHeaders:'', finalUrl:opts.url, error:'no bridge', context:opts.context }});
                 }}
                 return {{
                   abort: function(){{ aborted = true; }}
@@ -490,17 +497,29 @@ fn build_userscript_boot() -> String {
               // 用户脚本自身错误不冒泡到页面
             }}
           }}
-          var startNow = [], later = [];
+          var startNow = [], later = [], idle = [];
           SCRIPTS.forEach(function(s){{
             if (!matchLoc(s)) return;
-            (s.runAt === 'document-start' ? startNow : later).push(s);
+            // @noframes:在子 iframe 中不执行
+            if (s.noFrames && inSubframe()) return;
+            if (s.runAt === 'document-start') startNow.push(s);
+            else if (s.runAt === 'document-idle') idle.push(s);
+            else later.push(s); // document-end
           }});
           startNow.forEach(run);
           if (later.length) {{
-            function fire(){{ later.forEach(run); }}
+            function fireEnd(){{ later.forEach(run); }}
             if (document.readyState === 'loading')
-              document.addEventListener('DOMContentLoaded', fire, {{ once:true }});
-            else fire();
+              document.addEventListener('DOMContentLoaded', fireEnd, {{ once:true }});
+            else fireEnd();
+          }}
+          // document-idle:DOM 就绪后让出一轮再执行(DOMContentLoaded + setTimeout),
+          // 比 document-end 稍晚、但不等图片 load,对齐油猴默认时机。
+          if (idle.length) {{
+            function fireIdle(){{ setTimeout(function(){{ idle.forEach(run); }}, 0); }}
+            if (document.readyState === 'loading')
+              document.addEventListener('DOMContentLoaded', fireIdle, {{ once:true }});
+            else fireIdle();
           }}
         }})();
 "#,

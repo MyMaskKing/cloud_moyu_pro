@@ -215,6 +215,7 @@ async function syncUserScripts() {
         excludes: s.excludes,
         requires: s.requires,
         runAt: s.runAt,
+        noFrames: s.noFrames,
         enabled: s.enabled,
       })),
     });

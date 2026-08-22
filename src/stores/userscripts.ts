@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 
-export type RunAt = "document-start" | "document-end";
+export type RunAt = "document-start" | "document-end" | "document-idle";
 
 export interface UserScript {
   id: string;
@@ -12,6 +12,7 @@ export interface UserScript {
   excludes: string[];
   requires: string[];
   runAt: RunAt;
+  noFrames: boolean;
   enabled: boolean;
   createdAt: number;
 }
@@ -27,6 +28,7 @@ interface RawScript {
   excludes: string[];
   requires?: string[];
   runAt: string;
+  noFrames?: boolean;
   enabled: boolean;
   createdAt: number;
 }
@@ -44,7 +46,11 @@ function loadPersisted(): UserScript[] {
       includes: s.includes ?? [],
       excludes: s.excludes ?? [],
       requires: s.requires ?? [],
-      runAt: s.runAt === "document-start" ? "document-start" : "document-end",
+      runAt:
+        s.runAt === "document-start" || s.runAt === "document-idle"
+          ? s.runAt
+          : "document-end",
+      noFrames: s.noFrames === true,
       enabled: s.enabled !== false,
       createdAt: s.createdAt ?? 0,
     }));
@@ -99,7 +105,12 @@ export function parseUserScript(
     .map((u) => u.trim())
     .filter((u) => /^https?:\/\//i.test(u));
   const runRaw = (metaValues(lines, "run-at")[0] || "").trim().toLowerCase();
-  const runAt: RunAt = runRaw === "document-start" ? "document-start" : "document-end";
+  const runAt: RunAt =
+    runRaw === "document-start" || runRaw === "document-idle"
+      ? runRaw
+      : "document-end";
+  // @noframes:不在子 iframe 中执行(无值,出现即生效)
+  const noFrames = lines.some((l) => /^\/\/\s*@noframes\b/.test(l));
 
   if (!matches.length && !includes.length) {
     return { ok: false, error: "至少需要一条 @match 或 @include 规则" };
@@ -107,7 +118,7 @@ export function parseUserScript(
 
   return {
     ok: true,
-    script: { name, code, matches, includes, excludes, requires, runAt },
+    script: { name, code, matches, includes, excludes, requires, runAt, noFrames },
   };
 }
 

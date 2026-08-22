@@ -46,7 +46,8 @@ pnpm tauri build      # 完整打包（前端 + Rust release + 安装包）
 
 - `@match` / `@include` / `@exclude` / `@exclude_match`：URL 匹配
 - `@require https://...`：外链依赖（如 jQuery），由 Rust 预拉取并缓存，在用户代码前注入
-- `@run-at document-start | document-end`：注入时机
+- `@run-at document-start | document-end | document-idle`：注入时机（idle 为 DOM 就绪后让出一轮）
+- `@noframes`：声明后不在子 iframe 中执行
 - GM API：`GM_info` / `unsafeWindow` / `GM_addStyle` / `GM_setValue` / `GM_getValue` / `GM_deleteValue` / `GM_listValues` / `GM_xmlhttpRequest` / `GM_openInTab`
 
 ### 实现要点
